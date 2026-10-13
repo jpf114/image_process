@@ -80,7 +80,6 @@ void makeCtx(iptl::RenderCtx& ctx, const iptl::TileMatrixSet& tms, int z,
     ctx.format = "png";
     ctx.alg = GRA_Bilinear;
     ctx.outputDir = kDir;
-    ctx.levelRes = tms.levels[z].res;
     ctx.dataExtent = ext;
 }
 
@@ -106,7 +105,7 @@ TEST(RenderTile, FullValidTile) {
     std::error_code ec;
     std::filesystem::remove(tilePath(2, 1, 1), ec);
     const int rc =
-        iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 1, err);
+        iptl::renderTile(warpDs, bbox, ctx, tms.levels[2].res, 2, 1, 1, err);
     ASSERT_EQ(rc, 0) << err;
     EXPECT_TRUE(std::filesystem::exists(tilePath(2, 1, 1)));
 }
@@ -133,7 +132,7 @@ TEST(RenderTile, TransparentNodataHalf) {
     std::error_code ec;
     std::filesystem::remove(tilePath(1, 0, 0), ec);
     const int rc =
-        iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 1, 0, 0, err);
+        iptl::renderTile(warpDs, bbox, ctx, tms.levels[1].res, 1, 0, 0, err);
     ASSERT_EQ(rc, 0) << err;
     auto ds = ip::openReadOnly(tilePath(1, 0, 0));
     ASSERT_NE(ds, nullptr);
@@ -167,7 +166,7 @@ TEST(RenderTile, SkipEmptyTile) {
     // 但 alpha 全无效 → skip
     const iptl::TileBbox bbox = iptl::tileBbox(tms, 2, 1, 2, 256, 256);
     const int rc =
-        iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 2, err);
+        iptl::renderTile(warpDs, bbox, ctx, tms.levels[2].res, 2, 1, 2, err);
     EXPECT_EQ(rc, 1);
     EXPECT_FALSE(std::filesystem::exists(tilePath(2, 1, 2)));
 }
@@ -192,10 +191,9 @@ TEST(RenderTile, ResumeSkipsExisting) {
     const iptl::TileBbox bbox = iptl::tileBbox(tms, 2, 1, 1, 256, 256);
     std::error_code ec;
     std::filesystem::remove(tilePath(2, 1, 1), ec);
-    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 1, err), 0);
+    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, tms.levels[2].res, 2, 1, 1, err), 0);
     // 第二次：已存在 → 4，且不重复计为写出
-    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 1, err), 4);
-    EXPECT_EQ(ctx.resumed.load(), 1);
+    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, tms.levels[2].res, 2, 1, 1, err), 4);
 }
 
 TEST(RenderTile, FillMode) {
@@ -218,7 +216,7 @@ TEST(RenderTile, FillMode) {
     const iptl::TileBbox bbox = iptl::tileBbox(tms, 2, 2, 1, 256, 256);
     std::error_code ec;
     std::filesystem::remove(tilePath(2, 2, 1), ec);
-    ASSERT_EQ(iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 2, 1, err),
+    ASSERT_EQ(iptl::renderTile(warpDs, bbox, ctx, tms.levels[2].res, 2, 2, 1, err),
               0)
         << err;
     auto ds = ip::openReadOnly(tilePath(2, 2, 1));

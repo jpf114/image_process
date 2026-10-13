@@ -318,7 +318,6 @@ private:
             if (!solve(refIdx, edges, err)) return false;
         } else {
             // block_wallis / hist_match：不依赖图平差，目标=参考景全局统计/直方图
-            for (auto& S : scenes_) S.paramsSet = true;
             scenes_[refIdx].note = "参考景";
             report(cb, 35, "方法 " + params_.method + " 无需图平差");
         }
@@ -346,11 +345,15 @@ private:
             if (useWallis) {
                 report(cb, pct, "应用 Wallis " + S.id);
                 outPath = (fs::path(params_.output_dir) / (stem + ".tif")).string();
-                // 目标 μ/σ：显式 target_mean/std > （wallis_target_std>0）> 参考景统计
+                // 目标 μ/σ 优先级（与 i_color_balance.h 一致）：
+                // 显式 target_mean/std > （wallis_target_std>0）> 参考景统计
                 double tMean[3], tStd[3];
                 resolveTarget(scenes_[refIdx], tMean, tStd);
-                for (int b = 0; b < 3; ++b) {
-                    if (params_.wallis_target_std > 0) tStd[b] = params_.wallis_target_std;
+                if (params_.target_std.empty()) {
+                    for (int b = 0; b < 3; ++b) {
+                        if (params_.wallis_target_std > 0)
+                            tStd[b] = params_.wallis_target_std;
+                    }
                 }
                 const WallisGrid wg = computeWallisGrid(
                     S.ds.get(), tMean, tStd, params_.block_size, S.gain, S.offset);
@@ -437,17 +440,20 @@ private:
                     (fs::path(params_.output_dir) / "mosaic_cog.tif").string();
                 GDALDriver* cog =
                     GetGDALDriverManager()->GetDriverByName("COG");
-                GDALDataset* m = ip::openReadOnly(mosaicPath).release();
-                if (!cog || !m) {
-                    err = "COG 驱动或镶嵌 VRT 不可用";
+                if (!cog) {
+                    err = "COG 驱动不可用";
+                    return false;
+                }
+                ip::DataSetPtr m = ip::openReadOnly(mosaicPath);
+                if (!m) {
+                    err = "镶嵌 VRT 不可用: " + mosaicPath;
                     return false;
                 }
                 char** copts = CSLSetNameValue(nullptr, "COMPRESS", "DEFLATE");
                 copts = CSLSetNameValue(copts, "BLOCKSIZE", "512");
                 GDALDataset* out = cog->CreateCopy(
-                    cogPath.c_str(), m, FALSE, copts, nullptr, nullptr);
+                    cogPath.c_str(), m.get(), FALSE, copts, nullptr, nullptr);
                 CSLDestroy(copts);
-                GDALClose(m);
                 if (!out) {
                     err = "镶嵌 COG CreateCopy 失败: " + cogPath;
                     return false;
@@ -500,8 +506,6 @@ private:
         e.a = ia;
         e.b = ib;
         e.bounds = inter;
-        e.ax0 = ax0; e.ay0 = ay0; e.waW = aw; e.waH = ah;
-        e.bx0 = bx0; e.by0 = by0; e.wbW = bw; e.wbH = bh;
         e.statsA = ip::windowStatsRGB(A.ds.get(), ax0, ay0, aw, ah,
                                       params_.overlap_max_side);
         e.statsB = ip::windowStatsRGB(B.ds.get(), bx0, by0, bw, bh,
@@ -520,7 +524,6 @@ private:
     bool solve(int refIdx, std::vector<OverlapEdge>& edges, std::string& err) {
         (void)err;
         Scene& ref = scenes_[refIdx];
-        ref.paramsSet = true;
         ref.note = "参考景";
         ip::logInfo("参考景: " + ref.id);
 
@@ -541,7 +544,6 @@ private:
                     S.gain[b] = std::min(std::max(g, 0.2), 5.0);
                     S.offset[b] = tMean[b] - S.gain[b] * S.stats.mean[b];
                 }
-                S.paramsSet = true;
                 S.adjusted = true;
                 S.note = explicitTarget ? "global_adjust（对齐指定目标统计）"
                                         : "global_adjust（对齐参考景全局统计）";
@@ -668,7 +670,6 @@ private:
                 S.gain[b] = gainCls[cls][b];
                 S.offset[b] = offsetCls[cls][b];
             }
-            S.paramsSet = true;
             bool isIdentity = true;
             for (int b = 0; b < 3; ++b) {
                 if (std::abs(S.gain[b] - 1.0) > 1e-6 ||
@@ -751,7 +752,6 @@ private:
                 s.gain[b] = ji["transform"]["gain"][b].get<double>();
                 s.offset[b] = ji["transform"]["offset"][b].get<double>();
             }
-            s.paramsSet = true;
             fixed.push_back(std::move(s));
         }
         if (fixed.empty()) {
@@ -798,7 +798,6 @@ private:
             scenes_.push_back(std::move(s));
         }
         for (auto& s : scenes_) {
-            s.paramsSet = true;
             s.note = "append 新景";
         }
 

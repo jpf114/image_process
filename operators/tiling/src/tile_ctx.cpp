@@ -87,68 +87,6 @@ GDALDataset* threadLocalWarpDs(const std::string& vrtPath) {
 
 namespace {
 
-inline uint8_t clamp255(double v) {
-    int i = static_cast<int>(std::lround(v));
-    return static_cast<uint8_t>(std::min(std::max(i, 0), 255));
-}
-
-// 将窗口缓冲（winW×winH）重采样到 tile（S×S）：
-// 缩小 → box-average（有效像素加权平均，无效不参与）；放大 → near。
-// validMask 可空（全部有效）。
-void resampleToTile(const uint8_t* win, int winW, int winH, int nBands,
-                    const std::vector<uint8_t>& valid, int S,
-                    std::vector<uint8_t>& tile, std::vector<uint8_t>& tValid) {
-    tile.assign(static_cast<size_t>(nBands) * S * S, 0);
-    tValid.assign(static_cast<size_t>(S) * S, 0);
-    const double sx = static_cast<double>(winW) / S;
-    const double sy = static_cast<double>(winH) / S;
-    for (int j = 0; j < S; ++j) {
-        const int y0 = static_cast<int>(std::floor(j * sy));
-        const int y1 = std::min(static_cast<int>(std::ceil((j + 1) * sy)), winH);
-        if (y0 >= y1) continue;
-        for (int i = 0; i < S; ++i) {
-            const int x0 = static_cast<int>(std::floor(i * sx));
-            const int x1 = std::min(static_cast<int>(std::ceil((i + 1) * sx)), winW);
-            if (x0 >= x1) continue;
-            const size_t ti = static_cast<size_t>(j) * S + i;
-            if (sx >= 1.0 || sy >= 1.0) {
-                // 缩小：box-average（有效加权）
-                uint64_t cnt = 0;
-                double acc[4] = {0, 0, 0, 0};
-                for (int y = y0; y < y1; ++y) {
-                    const size_t row = static_cast<size_t>(y) * winW;
-                    for (int x = x0; x < x1; ++x) {
-                        const size_t si = row + x;
-                        if (!valid.empty() && !valid[si]) continue;
-                        ++cnt;
-                        for (int b = 0; b < nBands; ++b) {
-                            acc[b] += win[static_cast<size_t>(b) * winW * winH + si];
-                        }
-                    }
-                }
-                if (cnt == 0) continue;
-                tValid[ti] = 1;
-                const double inv = 1.0 / cnt;
-                for (int b = 0; b < nBands; ++b) {
-                    tile[static_cast<size_t>(b) * S * S + ti] =
-                        clamp255(acc[b] * inv);
-                }
-            } else {
-                // 放大：near
-                const int sxx = std::min(static_cast<int>(i / sx), winW - 1);
-                const int syy = std::min(static_cast<int>(j / sy), winH - 1);
-                const size_t si = static_cast<size_t>(syy) * winW + sxx;
-                if (!valid.empty() && !valid[si]) continue;
-                tValid[ti] = 1;
-                for (int b = 0; b < nBands; ++b) {
-                    tile[static_cast<size_t>(b) * S * S + ti] =
-                        win[static_cast<size_t>(b) * winW * winH + si];
-                }
-            }
-        }
-    }
-}
-
 // 编码写出：MEM → CreateCopy（png/webp 4 波段 RGBA；jpeg 3 波段）
 bool encodeTile(const std::vector<uint8_t>& tile, int nBands, int S,
                 const RenderCtx& ctx, const std::string& path,
@@ -264,7 +202,9 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
 
     uint64_t cnt = 0;
     for (int i = 0; i < S * S; ++i) cnt += tValid[i];
-    const double ratio = 100.0 * cnt / (static_cast<double>(S) * S);
+    // 无效占比（%）：与参数 nodata_pct_threshold 的语义一致（无效占比 ≥ 阈值 → 整瓦片不落盘）
+    const double invalidRatio =
+        100.0 * (1.0 - static_cast<double>(cnt) / (static_cast<double>(S) * S));
 
     const std::string ext =
         ctx.format == "jpeg" ? ".jpg" : "." + ctx.format;
@@ -276,7 +216,6 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
 
     // 0. 断点续跑：已存在且不强制覆盖 → 跳过（返回 4，与"写出"区分计数）
     if (ctx.resume && !ctx.overwrite && fs::exists(fs::path(path))) {
-        ctx.resumed++;
         return 4;
     }
 
@@ -288,8 +227,8 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
             std::fill(tile.begin(), tile.end(), 0);
             std::fill(tValid.begin(), tValid.end(), 0);
         }
-    } else if (ratio <= ctx.threshold && ctx.threshold < 100) {
-        return 2;  // 超阈值：整瓦片不落盘（阈值语义与 Phase 0 E 一致）
+    } else if (invalidRatio >= ctx.threshold) {
+        return 2;  // 无效占比达阈值：整瓦片不落盘
     }
 
     // 5. fill 模式 / jpeg：无效像素填色，去掉 alpha

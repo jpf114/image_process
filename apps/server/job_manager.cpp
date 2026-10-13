@@ -1,6 +1,7 @@
 // 服务化：任务队列/状态机/worker 进程池实现（posix_spawn + exec，避免线程化进程裸 fork）
 #include "job_manager.h"
 
+#include "ip/log.h"
 #include "ip/mem_guard.h"
 
 #include <fcntl.h>
@@ -24,6 +25,9 @@ namespace fs = std::filesystem;
 namespace ipsrv {
 
 namespace {
+
+constexpr size_t kMaxJobsInMemory = 2000;  // 内存任务表上限（终态最旧优先驱逐，磁盘状态保留）
+constexpr size_t kMaxListItems = 200;      // 列表接口单次返回上限
 
 std::string nowStamp() {
     char ts[32] = {0};
@@ -114,7 +118,6 @@ std::string JobManager::submit(const ip::Json& body, std::string& err) {
     ip::Json task = body;
     task.erase("name");
     task.erase("only");
-    j.task = task;
     j.state = "queued";
     j.createdAt = nowSec();
     j.jobDir = (fs::path(dataDir_) / "jobs" / j.id).string();
@@ -136,6 +139,7 @@ std::string JobManager::submit(const ip::Json& body, std::string& err) {
         jobs_[j.id] = j;
         queue_.push_back(j.id);
         persist(jobs_[j.id]);
+        pruneLocked();
     }
     cv_.notify_all();
     return j.id;
@@ -166,7 +170,11 @@ ip::Json JobManager::get(const std::string& id, bool& found) const {
 ip::Json JobManager::list() const {
     std::lock_guard<std::mutex> lk(mu_);
     ip::Json arr = ip::Json::array();
+    // 仅返回最新 kMaxListItems 条（id 为时间前缀，map 已按时间升序）
+    const size_t skip = jobs_.size() > kMaxListItems ? jobs_.size() - kMaxListItems : 0;
+    size_t idx = 0;
     for (const auto& [id, j] : jobs_) {
+        if (idx++ < skip) continue;
         ip::Json o;
         o["id"] = j.id;
         o["name"] = j.name;
@@ -196,7 +204,8 @@ std::string JobManager::logs(const std::string& id, bool& found) const {
     return out;
 }
 
-bool JobManager::cancel(const std::string& id, std::string& err) {
+bool JobManager::cancel(const std::string& id, std::string& outcome,
+                        std::string& err) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = jobs_.find(id);
     if (it == jobs_.end()) {
@@ -208,17 +217,36 @@ bool JobManager::cancel(const std::string& id, std::string& err) {
         queue_.erase(std::remove(queue_.begin(), queue_.end(), id), queue_.end());
         setStateLocked(j, "canceled", "提交后取消");
         persist(j);
+        outcome = "canceled";
         return true;
     }
     if (j.state == "running") {
+        // 仅发送取消请求：worker 可能仍在收尾，最终状态由回收线程确认
         if (j.pid > 0) ::kill(j.pid, SIGTERM);
         j.cancelRequested = true;
         j.message = "取消请求已发送";
         persist(j);
+        outcome = "cancel_requested";
         return true;
     }
     err = "任务已结束（" + j.state + "），无需取消";
     return false;
+}
+
+// 内存任务表上限保护：驱逐最旧的终态任务（磁盘 state.json 保留，历史不丢）
+void JobManager::pruneLocked() {
+    if (jobs_.size() <= kMaxJobsInMemory) return;
+    for (auto it = jobs_.begin();
+         it != jobs_.end() && jobs_.size() > kMaxJobsInMemory;) {
+        const Job& j = it->second;
+        const bool terminal = j.state == "done" || j.state == "failed" ||
+                              j.state == "canceled";
+        if (terminal && j.pid <= 0) {
+            it = jobs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 int JobManager::runningCountLocked() const {
@@ -438,6 +466,24 @@ void JobManager::stop() {
         }
     }
     cv_.notify_all();
+    // 限时等待 worker 退出；超时升级 SIGKILL（避免 worker 忽略 SIGTERM 时 join 永久挂起）
+    for (int i = 0; i < 50; ++i) {  // 最多约 5s
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (runningCountLocked() == 0) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& [id, j] : jobs_) {
+            if (j.state == "running" && j.pid > 0) {
+                ip::logWarn("worker 未响应 SIGTERM，升级 SIGKILL: pid " +
+                            std::to_string(j.pid));
+                ::kill(j.pid, SIGKILL);
+            }
+        }
+    }
     if (schedThread_.joinable()) schedThread_.join();
     if (reaperThread_.joinable()) reaperThread_.join();
 }

@@ -25,11 +25,9 @@ bool buildWarpedVrt(GDALDataset* src, const TileMatrixSet& tms,
 
 // 瓦片渲染参数
 struct RenderCtx {
-    const TilingParams* params = nullptr;
     int nBands = 0;              // warp 后波段数（3 或 4）
     int tileSize = 256;
-    int tileW = 0, tileH = 0;
-    int threshold = 100;         // 无效占比阈值（%）
+    int threshold = 100;         // 无效占比阈值（%）：无效占比 ≥ 阈值 → 整瓦片不落盘
     bool skipEmpty = true;
     bool fillMode = false;       // nodata_mode=fill_color
     int fillValue = 255;
@@ -39,11 +37,9 @@ struct RenderCtx {
     GDALResampleAlg alg = GRA_Bilinear;
     std::string outputDir;
     bool jpegWarned = false;
-    double levelRes = 0;         // 当前级瓦片分辨率（瓦片子区定位）
     ip::GeoExtent dataExtent;    // warp 数据范围（交集计算）
     bool resume = true;          // 已存在瓦片跳过
     bool overwrite = false;
-    std::atomic<long long> resumed{0};  // 续跑跳过计数
 };
 
 // 渲染并写出一张瓦片；返回值：

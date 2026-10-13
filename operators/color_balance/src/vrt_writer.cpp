@@ -140,7 +140,9 @@ bool writeBalancedVrt(GDALDataset* src, const std::string& vrtPath,
             xml << " subClass=\"VRTDerivedRasterBand\"";
         }
         xml << ">\n";
-        xml << "    <ColorInterp>" << interp[b] << "</ColorInterp>\n";
+        // ColorInterp 名表仅 4 项（RGB+Alpha）；>4 波段时用 Undefined，避免越界
+        const char* ci = b < 4 ? interp[b] : "Undefined";
+        xml << "    <ColorInterp>" << ci << "</ColorInterp>\n";
         if (b < 3) {
             xml << "    <PixelFunctionType>ip_gain_offset</PixelFunctionType>\n";
             xml << "    <PixelFunctionArguments gain=\"" << gain[b]
@@ -224,7 +226,8 @@ bool writeMosaicVrt(const std::vector<VrtSource>& sources, int bands,
     for (int b = 0; b < bands; ++b) {
         xml << "  <VRTRasterBand dataType=\"Byte\" band=\"" << (b + 1)
             << "\" subClass=\"VRTSourcedRasterBand\">\n";
-        xml << "    <ColorInterp>" << interp[b] << "</ColorInterp>\n";
+        const char* ci = b < 4 ? interp[b] : "Undefined";
+        xml << "    <ColorInterp>" << ci << "</ColorInterp>\n";
         for (const auto& s : sources) {
             const int dstX = static_cast<int>(std::lround((s.minX - minX) / resX));
             const int dstY = static_cast<int>(std::lround((maxY - s.maxY) / resY));

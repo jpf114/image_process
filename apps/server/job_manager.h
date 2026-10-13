@@ -23,7 +23,6 @@ struct Job {
     std::string id;
     std::string name;
     std::string only;        // ""（全流程）| color | tiling
-    ip::Json task;           // 传给 workflow --config 的完整配置
     std::string state;       // queued | running | done | failed | canceled
     std::string message;     // 附加说明（错误/中断原因）
     int percent = 0;
@@ -51,8 +50,9 @@ public:
     ip::Json list() const;
     std::string logs(const std::string& id, bool& found) const;
 
-    // 取消：queued → 直接置 canceled；running → SIGTERM（由回收线程确认）
-    bool cancel(const std::string& id, std::string& err);
+    // 取消：queued → 立即置 canceled（outcome="canceled"）；running → 发 SIGTERM 并置
+    // cancelRequested（outcome="cancel_requested"，由回收线程确认最终状态）
+    bool cancel(const std::string& id, std::string& outcome, std::string& err);
 
     void start();
     void stop();  // SIGTERM 全部运行中 worker，等待退出
@@ -64,11 +64,10 @@ private:
     void schedulerLoop();
     void reaperLoop();
     void dispatchLocked(Job& j);           // 需持有 mutex_
-    void refreshProgress(Job& j);          // 无锁调用（仅读日志文件）
     void persist(const Job& j) const;      // 原子写 <jobDir>/state.json
     void setStateLocked(Job& j, const std::string& st, const std::string& msg);
     int runningCountLocked() const;
-    std::string workerPathForLog() const { return workerExe_; }
+    void pruneLocked();                    // 内存中任务表上限保护（终态最旧优先驱逐）
 
     std::string dataDir_;
     std::string workerExe_;

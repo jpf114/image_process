@@ -23,7 +23,6 @@ struct Scene {
     ip::BandStats3 stats;
     double gain[3] = {1, 1, 1};
     double offset[3] = {0, 0, 0};
-    bool paramsSet = false;  // 参数已确定（含"被门控跳过"的恒等）
     bool adjusted = false;   // 参数非恒等
     std::string note;
 };
@@ -31,9 +30,6 @@ struct Scene {
 struct OverlapEdge {
     int a = -1, b = -1;      // scene 下标
     ip::GeoExtent bounds;    // 地理交集
-    int waW = 0, waH = 0;    // A 的交集窗口
-    int wbW = 0, wbH = 0;    // B 的交集窗口
-    int ax0 = 0, ay0 = 0, bx0 = 0, by0 = 0;
     ip::BandStats3 statsA, statsB;
     double deltaMu[3] = {0, 0, 0};
     double deltaMuMax = 0;

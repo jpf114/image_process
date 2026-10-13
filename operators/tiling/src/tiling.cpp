@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <mutex>
@@ -56,18 +57,19 @@ public:
             err = "nodata_pct_threshold 取值 0~100";
             return false;
         }
-        if (params_.tiles_scope != "full" && params_.tiles_scope != "footprint") {
-            err = "tiles_scope 仅支持 full / footprint";
-            return false;
-        }
-        if (params_.tiles_scope == "footprint" && params_.bbox.empty()) {
-            err = "tiles_scope=footprint 需同时给出增量范围 bbox";
-            return false;
-        }
         if (params_.build_overviews != "auto" && params_.build_overviews != "yes" &&
             params_.build_overviews != "no") {
             err = "overview_policy/build_overviews 仅支持 auto / yes / no";
             return false;
+        }
+        // bbox 格式在参数校验阶段即拒绝（与其它参数一致返回参数错误，而非执行期失败）
+        if (!params_.bbox.empty()) {
+            double bx0, by0, bx1, by1;
+            if (std::sscanf(params_.bbox.c_str(), "%lf,%lf,%lf,%lf", &bx0, &by0,
+                            &bx1, &by1) != 4) {
+                err = "bbox 格式应为 minX,minY,maxX,maxY: " + params_.bbox;
+                return false;
+            }
         }
         return true;
     }
@@ -176,14 +178,11 @@ private:
                     std::to_string(extent.maxX) + ", " +
                     std::to_string(extent.maxY) + "]");
 
-        // 3.5 增量范围（bbox 按 TMS CRS 坐标；与数据范围求交）
+        // 3.5 增量范围（bbox 按 TMS CRS 坐标；与数据范围求交；格式已在 configure 校验）
         if (!params_.bbox.empty()) {
             double bx0, by0, bx1, by1;
-            if (std::sscanf(params_.bbox.c_str(), "%lf,%lf,%lf,%lf", &bx0,
-                            &by0, &bx1, &by1) != 4) {
-                err = "bbox 格式应为 minX,minY,maxX,maxY: " + params_.bbox;
-                return false;
-            }
+            std::sscanf(params_.bbox.c_str(), "%lf,%lf,%lf,%lf", &bx0, &by0, &bx1,
+                        &by1);
             extent.minX = std::max(extent.minX, std::min(bx0, bx1));
             extent.maxX = std::min(extent.maxX, std::max(bx0, bx1));
             extent.minY = std::max(extent.minY, std::min(by0, by1));
@@ -199,16 +198,17 @@ private:
         }
 
         // 4. zoom 推算：max = 最大 z 使 levelRes >= warpRes（不超采样）
-        //    CLI 的 zoom 语义 = identifier（天地图层级），换算到矢量索引
+        //    CLI 的 zoom 语义 = identifier（天地图层级），换算到矢量索引。
+        //    必须夹取到 [0, levelCount-1]：CGCS2000 idOffset=1 时 --max-zoom 0 会得 -1，
+        //    否则 tms_.level(-1) 越界（未定义行为）
         int maxZ = 0;
         for (int z = 0; z < tms_.levelCount(); ++z) {
             if (tms_.level(z).res >= warpRes) maxZ = z;
         }
-        int minZ = params_.min_zoom >= 0 ? params_.min_zoom - tms_.idOffset
-                                         : 0;
         if (params_.max_zoom >= 0) maxZ = params_.max_zoom - tms_.idOffset;
-        maxZ = std::min(maxZ, tms_.levelCount() - 1);
-        minZ = std::min(minZ, maxZ);
+        maxZ = std::max(0, std::min(maxZ, tms_.levelCount() - 1));
+        int minZ = params_.min_zoom >= 0 ? params_.min_zoom - tms_.idOffset : 0;
+        minZ = std::max(0, std::min(minZ, maxZ));
         ip::logInfo("zoom 范围: " + std::to_string(tms_.dirLevel(minZ)) + "~" +
                     std::to_string(tms_.dirLevel(maxZ)) +
                     "（源分辨率锚定，over-zoom 可 --max-zoom 覆盖）");
@@ -247,7 +247,6 @@ private:
 
         // 6. 渲染上下文
         RenderCtx ctx;
-        ctx.params = &params_;
         ctx.nBands = src->GetRasterCount();
         ctx.tileSize = params_.tile_size;
         ctx.threshold = params_.nodata_pct_threshold;

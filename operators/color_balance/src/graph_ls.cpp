@@ -69,7 +69,6 @@ bool solveLeastSquares(const std::vector<LsEquation>& eqs, int nVars,
     }
 
     // 3. 高斯消元（部分主元）；奇异则正则化微退（对角加 eps）
-    const double eps = 1e-9;
     for (int col = 0; col < n; ++col) {
         int piv = col;
         double best = std::abs(ata[static_cast<size_t>(col) * n + col]);
@@ -115,7 +114,6 @@ bool solveLeastSquares(const std::vector<LsEquation>& eqs, int nVars,
     for (int v = 0; v < nVars; ++v) {
         if (remap[v] >= 0) out[v] = full[remap[v]];
     }
-    (void)eps;
     return true;
 }
 

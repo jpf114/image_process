@@ -40,9 +40,8 @@ struct TilingParams {
     std::string build_overviews = "auto"; // auto（无 ovr 时自动建，AVERAGE 2~64）| yes | no
                                           // 等价方案 §5.2 overview_policy（CLI 提供别名）
     std::string bbox;                  // 增量范围 "minX,minY,maxX,maxY"（空=全量，源 SRS 坐标）
-    // 切片范围（方案 §5.2）：full（全量，默认）| footprint（增量：仅切 bbox⊕缓冲瓦片）。
-    // footprint 需配合 bbox 使用（bbox 缺失时报错）。
-    std::string tiles_scope = "full";
+                                       // 增量切片由 bbox 承载（等价方案 §5.2 的 tiles_scope=footprint；
+                                       // 未单独暴露 tiles_scope，避免空转参数）
     bool resume = true;                // 断点续跑：已存在瓦片跳过
     bool overwrite = false;            // true 时强制重写已存在瓦片
     bool use_gpu = false;              // GPU 占位（本期纯 CPU，开启仅告警）

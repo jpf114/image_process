@@ -10,7 +10,6 @@ namespace ip {
 namespace {
 std::mutex g_logMutex;
 std::FILE* g_logFile = nullptr;
-std::string g_logPath;
 } // namespace
 
 void logSetFile(const std::string& path) {
@@ -26,10 +25,7 @@ void logSetFile(const std::string& path) {
         std::filesystem::create_directories(path.substr(0, slash), ec);
     }
     g_logFile = std::fopen(path.c_str(), "ab");
-    g_logPath = g_logFile ? path : std::string();
 }
-
-std::string logFilePath() { return g_logPath; }
 
 void logMessage(LogLevel level, const std::string& msg) {
     const char* tag = level == LogLevel::Info ? "INFO" :
@@ -47,11 +43,16 @@ void logMessage(LogLevel level, const std::string& msg) {
     char line[4096];
     const int n = std::snprintf(line, sizeof(line), "[%s %s] %s\n", timeBuf, tag,
                                 msg.c_str());
+    if (n < 0) return;
+    // snprintf 返回"应写长度"（可 > 缓冲区），必须夹取后再写，否则越界读栈
+    const size_t len = static_cast<size_t>(n) < sizeof(line)
+                           ? static_cast<size_t>(n)
+                           : sizeof(line) - 1;
     std::FILE* out = level == LogLevel::Error ? stderr : stdout;
-    std::fwrite(line, 1, static_cast<size_t>(n), out);
+    std::fwrite(line, 1, len, out);
     std::fflush(out);
     if (g_logFile) {
-        std::fwrite(line, 1, static_cast<size_t>(n), g_logFile);
+        std::fwrite(line, 1, len, g_logFile);
         std::fflush(g_logFile);
     }
 }

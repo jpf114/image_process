@@ -215,6 +215,15 @@ WallisGrid computeWallisGrid(GDALDataset* ds, const double targetMean[3],
     wg.b.assign(static_cast<size_t>(3) * wg.nby * wg.nbx, 0.0f);
     if (nb < 3) return wg;
 
+    // nodata 掩码：与 block_stats / writeTransformedTiff 口径一致（否则暗景无效区 0 值会拉偏块统计）
+    std::vector<int> hasNd(3, 0);
+    std::vector<double> nd(3, 0.0);
+    for (int b = 0; b < 3; ++b) {
+        int hv = 0;
+        nd[b] = ds->GetRasterBand(b + 1)->GetNoDataValue(&hv);
+        hasNd[b] = hv;
+    }
+
     std::vector<char> hasData(static_cast<size_t>(wg.nby) * wg.nbx, 0);
     for (int iy = 0; iy < wg.nby; ++iy) {
         for (int ix = 0; ix < wg.nbx; ++ix) {
@@ -238,6 +247,15 @@ WallisGrid computeWallisGrid(GDALDataset* ds, const double targetMean[3],
             double sum[3] = {0, 0, 0}, sumsq[3] = {0, 0, 0};
             for (size_t i = 0; i < n; ++i) {
                 if (alpha && alpha[i] == 0) continue;
+                bool ok = true;
+                for (int b = 0; b < 3 && ok; ++b) {
+                    if (hasNd[b] &&
+                        static_cast<double>(
+                            blk[static_cast<size_t>(b) * n + i]) == nd[b]) {
+                        ok = false;
+                    }
+                }
+                if (!ok) continue;
                 ++cnt;
                 for (int b = 0; b < 3; ++b) {
                     const double v = blk[static_cast<size_t>(b) * n + i];

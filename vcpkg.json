@@ -5,6 +5,7 @@
   "dependencies": [
     "gdal",
     "nlohmann-json",
-    "cpp-httplib"
+    "cpp-httplib",
+    "gtest"
   ]
 }

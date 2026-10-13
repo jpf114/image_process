@@ -71,8 +71,6 @@ bool geoBoundsToPixelWindow(const GDALDataset* ds, const GeoExtent& bounds,
     const double cy1 = std::min(bounds.maxY, imgMaxY);
     if (cx0 >= cx1 || cy0 >= cy1) return false;
 
-    const double resX = std::abs(gt[1]);
-    const double resY = std::abs(gt[5]);
     const int px0 = static_cast<int>(std::floor((cx0 - gt[0]) / gt[1]));
     const int px1 = static_cast<int>(std::ceil((cx1 - gt[0]) / gt[1]));
     const int py0 = static_cast<int>(std::floor((gt[3] - cy1) / -gt[5]));
@@ -85,8 +83,6 @@ bool geoBoundsToPixelWindow(const GDALDataset* ds, const GeoExtent& bounds,
     if (x0 >= x1 || y0 >= y1) return false;
     w = x1 - x0;
     h = y1 - y0;
-    (void)resX;
-    (void)resY;
     return true;
 }
 

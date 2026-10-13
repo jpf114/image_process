@@ -129,6 +129,10 @@ int main(int argc, char** argv) {
         if (jc.contains("write_profile")) p.write_profile = jc["write_profile"].get<bool>();
 
         ipcb::IColorBalance* cb = createColorBalance();
+        if (!cb) {
+            std::cerr << "创建匀色 operator 失败" << std::endl;
+            return 1;
+        }
         if (!cb->configure(p, err)) {
             std::cerr << "匀色参数错误: " << err << std::endl;
             destroyColorBalance(cb);
@@ -178,7 +182,6 @@ int main(int argc, char** argv) {
         if (jt.contains("build_overviews")) p.build_overviews = jt["build_overviews"].get<std::string>();
         if (jt.contains("overview_policy")) p.build_overviews = jt["overview_policy"].get<std::string>();
         if (jt.contains("bbox")) p.bbox = jt["bbox"].get<std::string>();
-        if (jt.contains("tiles_scope")) p.tiles_scope = jt["tiles_scope"].get<std::string>();
         if (jt.contains("resume")) p.resume = jt["resume"].get<bool>();
         if (jt.contains("overwrite")) p.overwrite = jt["overwrite"].get<bool>();
         if (jt.contains("keep_tmp_vrt")) p.keep_tmp_vrt = jt["keep_tmp_vrt"].get<bool>();
@@ -186,6 +189,10 @@ int main(int argc, char** argv) {
         if (jt.contains("min_mem_gb")) p.min_mem_gb = jt["min_mem_gb"].get<double>();
 
         iptl::ITiling* tl = createTiling();
+        if (!tl) {
+            std::cerr << "创建切片 operator 失败" << std::endl;
+            return 1;
+        }
         if (!tl->configure(p, err)) {
             std::cerr << "切片参数错误: " << err << std::endl;
             destroyTiling(tl);

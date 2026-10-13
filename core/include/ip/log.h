@@ -13,9 +13,6 @@ void logMessage(LogLevel level, const std::string& msg);
 // 建议：<output_dir>/logs/run_<时间戳>.log
 void logSetFile(const std::string& path);
 
-// 当前文件日志路径（未启用返回空）
-std::string logFilePath();
-
 inline void logInfo(const std::string& msg)  { logMessage(LogLevel::Info, msg); }
 inline void logWarn(const std::string& msg)  { logMessage(LogLevel::Warn, msg); }
 inline void logError(const std::string& msg) { logMessage(LogLevel::Error, msg); }

@@ -24,6 +24,7 @@
 
 #include <httplib.h>
 
+#include <atomic>
 #include <csignal>
 #include <filesystem>
 #include <iostream>
@@ -57,6 +58,16 @@ int defaultWorkers() {
     return std::max(1, std::min(cores, std::max(1, byMem)));
 }
 
+// 常量时间比较（避免按前缀短路泄漏令牌长度/内容）
+bool constTimeEq(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
 void usage() {
     std::cout
         << "用法: ip_server --data-dir <目录> [选项]\n"
@@ -73,6 +84,15 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // 信号必须在创建任何线程之前屏蔽：否则后续线程继承"未屏蔽"掩码，
+    // 定向 SIGTERM 可能投递到这些线程并按默认动作终止进程，绕过优雅退出（R8）
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &set, nullptr);
+    std::signal(SIGPIPE, SIG_IGN);  // cpp-httplib SIGPIPE 注意事项
+
     std::string host = "0.0.0.0";
     int port = 8080;
     std::string dataDir, tilesDir, token, workerExe;
@@ -150,7 +170,8 @@ int main(int argc, char** argv) {
         if (token.empty() || req.path == "/api/v1/health") {
             return httplib::Server::HandlerResponse::Unhandled;
         }
-        if (req.get_header_value("Authorization") != "Bearer " + token) {
+        if (!constTimeEq(req.get_header_value("Authorization"),
+                         "Bearer " + token)) {
             sendJson(res, 401, {{"error", "unauthorized"}});
             return httplib::Server::HandlerResponse::Handled;
         }
@@ -210,12 +231,17 @@ int main(int argc, char** argv) {
 
     svr.Delete(R"(/api/v1/jobs/([^/]+))",
                [&mgr](const httplib::Request& req, httplib::Response& res) {
-                   std::string err;
-                   if (!mgr.cancel(req.matches[1].str(), err)) {
+                   std::string outcome, err;
+                   if (!mgr.cancel(req.matches[1].str(), outcome, err)) {
                        sendJson(res, 409, {{"error", err}});
                        return;
                    }
-                   sendJson(res, 200, {{"canceled", req.matches[1].str()}});
+                   // running → 202（取消请求已受理，最终状态由回收线程确认）；queued → 200
+                   if (outcome == "cancel_requested") {
+                       sendJson(res, 202, {{"cancel_requested", req.matches[1].str()}});
+                   } else {
+                       sendJson(res, 200, {{"canceled", req.matches[1].str()}});
+                   }
                });
 
     // 静态瓦片（长文件传输不经任务线程池排队逻辑，交由 httplib 文件服务）
@@ -226,20 +252,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 优雅退出：主线程 sigwait，收到信号后 svr.stop()（R8）
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGINT);
-    sigaddset(&set, SIGTERM);
-    pthread_sigmask(SIG_BLOCK, &set, nullptr);
-    std::signal(SIGPIPE, SIG_IGN);  // cpp-httplib SIGPIPE 注意事项
-
-    std::thread listenThread([&svr, &host, port, &mgr] {
+    // 监听线程：失败时向自身发 SIGTERM 唤醒主线程统一退出（不在子线程 std::exit）
+    std::atomic<bool> listenOk{true};
+    std::thread listenThread([&] {
         if (!svr.listen(host, port)) {
             ip::logError("监听失败（端口被占用？）");
-            std::exit(1);
+            listenOk.store(false);
+            ::kill(::getpid(), SIGTERM);
         }
-        (void)mgr;
     });
 
     int sig = 0;
@@ -247,7 +267,7 @@ int main(int argc, char** argv) {
     ip::logInfo("收到信号 " + std::to_string(sig) + "，开始优雅退出");
     svr.stop();
     listenThread.join();
-    mgr.stop();  // SIGTERM 全部 worker，等待回收
+    mgr.stop();  // SIGTERM 全部 worker（超时升级 SIGKILL），等待回收
     ip::logInfo("==== ip_server 已退出 ====");
-    return 0;
+    return listenOk.load() ? 0 : 1;
 }
