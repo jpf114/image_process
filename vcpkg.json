@@ -1,0 +1,10 @@
+{
+  "name": "image-process",
+  "version": "0.1.0",
+  "description": "栅格影像匀色与切片 C++ 工具集",
+  "dependencies": [
+    "gdal",
+    "nlohmann-json",
+    "opencv4"
+  ]
+}

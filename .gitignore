@@ -1,0 +1,21 @@
+# 构建产物
+build/
+bin/
+dist/
+output/
+*.o
+*.so
+*.so.*
+*.a
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+
+# GDAL 辅助
+*.aux.xml
+*.ovr
+
+# 测试数据（大文件不入库）
+文档资料/关于栅格切片和匀色/data/

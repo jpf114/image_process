@@ -1,0 +1,29 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "linux",
+            "displayName": "vcpkg x64-linux 动态 (GCC/Ninja, Release)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/release",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-linux",
+                "CMAKE_BUILD_TYPE": "Release",
+                "VCPKG_MANIFEST_MODE": "OFF"
+            }
+        },
+        {
+            "name": "linux-debug",
+            "inherits": "linux",
+            "displayName": "vcpkg x64-linux 动态 (GCC/Ninja, Debug)",
+            "binaryDir": "${sourceDir}/build/debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "linux", "configurePreset": "linux" },
+        { "name": "linux-debug", "configurePreset": "linux-debug" }
+    ]
+}
