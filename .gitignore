@@ -6,6 +6,8 @@ output/
 vcpkg_installed/
 compile_commands.json
 CMakeUserPresets.json
+docker/ctx/
+ipdata/
 *.o
 *.so
 *.so.*

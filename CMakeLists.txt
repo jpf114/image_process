@@ -45,6 +45,8 @@ endif()
 # 结论：不引入 OpenCV 依赖；再引入条件见 技术方案.md §3.6。
 find_package(GDAL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+# 服务化控制面（header-only HTTP，Phase 4）
+find_package(httplib CONFIG REQUIRED)
 
 add_subdirectory(core)
 add_subdirectory(operators)
@@ -54,7 +56,7 @@ enable_testing()
 add_subdirectory(tests)
 
 # 安装规则：仅装交付物（operator 动态库 + 全部 exe），core 静态并入动态库不单独安装
-install(TARGETS ip_color_balance ip_tiling color_balance tiling workflow
+install(TARGETS ip_color_balance ip_tiling color_balance tiling workflow ip_server
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION bin)
 # 随库分发 CGCS2000 TMS 定义（供 GDAL CLI / 外部工具使用；自研引擎内置该方案）
