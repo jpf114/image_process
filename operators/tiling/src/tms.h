@@ -39,6 +39,10 @@ TileMatrixSet makeCGCS2000(int maxLevel = 24);  // 天地图规范：z1 全球 2
 bool parseTmsJson(const std::string& jsonPath, TileMatrixSet& tms,
                   std::string& err);
 
+// 层级的 OGC scaleDenominator（= 每像元跨度 / 0.28e-3；地理坐标先折算为米）。
+// 用于把 TileMatrixSet 回写成 TILING_SCHEME JSON（GPKG 打包）。
+double scaleDenominator(const TileMatrixLevel& level, bool geographic);
+
 // 按名称或 JSON 路径取方案；失败填充 err
 bool resolveTms(const std::string& nameOrPath, TileMatrixSet& tms,
                 std::string& err);

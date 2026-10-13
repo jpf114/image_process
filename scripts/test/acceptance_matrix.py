@@ -78,6 +78,53 @@ def tails_has(needle):
     return f
 
 
+# ---------- 打包（S4）校验辅助 ----------
+
+def sql_rows(path, sql):
+    import sqlite3
+    c = sqlite3.connect(path)
+    try:
+        return list(c.execute(sql))
+    finally:
+        c.close()
+
+
+def pkg_tile_diff(pkg_path, ref_dir, table, zoom_shift, tms_row):
+    """包内瓦片与散文件参照逐像素比对（PNG 无损，期望完全相同）。
+
+    table: 瓦片表名；zoom_shift: SQL zoom_level → 目录层级号的偏移
+    tms_row: True 则 SQL tile_row 为 TMS（自下而上），否则为 XYZ（自上而下）
+    返回 (全部一致, 说明)
+    """
+    import numpy as np
+    from osgeo import gdal
+    rows = sql_rows(pkg_path, f"SELECT zoom_level,tile_column,tile_row FROM {table}")
+    if not rows:
+        return False, "包内无瓦片"
+    worst = 0
+    checked = 0
+    for z, col, row in rows:
+        y = (1 << z) - 1 - row if tms_row else row
+        ref = gdal.Open(f"{ref_dir}/{z + zoom_shift}/{col}/{y}.png")
+        if ref is None:
+            return False, f"缺散文件参照 z{z + zoom_shift}/{col}/{y}"
+        a = ref.ReadAsArray()
+        ref = None
+        ds = gdal.OpenEx(pkg_path, gdal.OF_RASTER,
+                         open_options=[f"ZOOM_LEVEL={z}"]
+                         + ([] if tms_row else [f"TABLE={table}"]))
+        if ds is None:
+            return False, f"包打不开 z{z}"
+        b = ds.ReadAsArray(col * 256, y * 256, 256, 256)
+        ds = None
+        if b is None:
+            return False, f"包内读取失败 z{z}/{col}/{y}"
+        d = int(np.abs(a[:3].astype(int) - b[:3].astype(int)).max())
+        worst = max(worst, d)
+        checked += 1
+    return worst == 0, f"逐像素比对 {checked} 张，最大差 {worst}"
+
+
 def make_fixtures():
     """测试夹具：3 波段 VRT、1 波段影像、workflow 正常/缺段/损坏配置"""
     from osgeo import gdal  # geo_env
@@ -209,6 +256,78 @@ def main():
          {0}, lambda rc, o, t: (("recreate" in o) and os.path.exists(f"{OUT}/c_recreate/mosaic.vrt"), "recreate 日志 + mosaic.vrt"))
     case("B18 workflow 全流程（vrt→切片）", [W, "--config", f"{OUT}/wf_ok.json"], {0},
          lambda rc, o, t: (count_ext(f"{OUT}/wf_tiles", ".png") > 0, f"瓦片 {count_ext(f'{OUT}/wf_tiles', '.png')} 张"))
+
+    # ---------- E. 打包输出（S4：MBTiles / GeoPackage） ----------
+    # 先生成散文件参照（供逐像素比对）
+    run([T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_ref_merc",
+         "--tiling-scheme", "WebMercatorQuad", "--max-zoom", "9"])
+    run([T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_ref_cgcs",
+         "--tiling-scheme", "CGCS2000", "--min-zoom", "13", "--max-zoom", "13", "--bbox", bbox])
+
+    def chk_mbtiles(rc, out, tag):
+        pkg = f"{OUT}/pkg_mb/tiles.mbtiles"
+        if not os.path.exists(pkg):
+            return False, "包文件不存在"
+        n = sql_rows(pkg, "SELECT COUNT(*) FROM tiles")[0][0]
+        meta = dict(sql_rows(pkg, "SELECT name,value FROM metadata"))
+        if n <= 0:
+            return False, "tiles 表为空"
+        if meta.get("minzoom") != "0" or meta.get("maxzoom") != "9":
+            return False, f"minzoom/maxzoom 不符: {meta.get('minzoom')}/{meta.get('maxzoom')}"
+        ok, d = pkg_tile_diff(pkg, f"{OUT}/pkg_ref_merc", "tiles", 0, True)
+        return ok, f"tiles {n}，元数据 minzoom/maxzoom 正确；{d}"
+
+    case("E01 package=mbtiles（含逐像素比对与元数据）",
+         [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_mb",
+          "--tiling-scheme", "WebMercatorQuad", "--max-zoom", "9", "--package", "mbtiles"],
+         {0}, chk_mbtiles)
+
+    def chk_gpkg(rc, out, tag):
+        pkg = f"{OUT}/pkg_gp/tiles.gpkg"
+        if not os.path.exists(pkg):
+            return False, "包文件不存在"
+        n = sql_rows(pkg, "SELECT COUNT(*) FROM tiles")[0][0]
+        tm = sql_rows(pkg, "SELECT COUNT(*) FROM gpkg_tile_matrix")[0][0]
+        if n <= 0:
+            return False, "tiles 表为空"
+        if tm <= 0:
+            return False, "gpkg_tile_matrix 未登记层级"
+        # GPKG tile_row 为 XYZ（自上而下）；SQL zoom_level = 目录层级 - 1（CGCS2000 从 1 起）
+        ok, d = pkg_tile_diff(pkg, f"{OUT}/pkg_ref_cgcs", "tiles", 1, False)
+        return ok, f"tiles {n}，tile_matrix {tm} 层；{d}"
+
+    case("E02 package=gpkg（CGCS2000，含逐像素比对）",
+         [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_gp",
+          "--tiling-scheme", "CGCS2000", "--min-zoom", "13", "--max-zoom", "13",
+          "--bbox", bbox, "--package", "gpkg"],
+         {0}, chk_gpkg)
+
+    case("E03 包模式不落散文件",
+         [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_mb",
+          "--tiling-scheme", "WebMercatorQuad", "--max-zoom", "9", "--package", "mbtiles"],
+         {0}, lambda rc, o, t: (count_ext(f"{OUT}/pkg_mb", ".png") == 0,
+                                f"散文件 {count_ext(f'{OUT}/pkg_mb', '.png')} 张（期望 0）"))
+
+    case("E04 增量追加（相邻 bbox 新增瓦片）",
+         [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_gp",
+          "--tiling-scheme", "CGCS2000", "--min-zoom", "13", "--max-zoom", "13",
+          "--bbox", "105.32,29.02,105.34,29.04", "--package", "gpkg"],
+         {0}, lambda rc, o, t: (("追加到既有包" in o) and
+                                sql_rows(f"{OUT}/pkg_gp/tiles.gpkg",
+                                         "SELECT COUNT(*) FROM tiles")[0][0] == 2,
+                                "追加且瓦片数 1→2"))
+
+    case("E05 package=mbtiles 仅限 WebMercatorQuad", [T, "--input", f"{OUT}/mosaic_like.vrt",
+                                                 "--output-dir", f"{OUT}/pkg_e5",
+                                                 "--tiling-scheme", "CGCS2000", "--package", "mbtiles"],
+         {2}, tails_has("仅支持 tiling_scheme=WebMercatorQuad"))
+    case("E06 打包模式 tile_size 须 256", [T, "--input", f"{OUT}/mosaic_like.vrt",
+                                          "--output-dir", f"{OUT}/pkg_e6", "--tile-size", "512",
+                                          "--package", "gpkg"],
+         {2}, tails_has("tile_size 须为 256"))
+    case("E07 package 非法值", [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_e7",
+                             "--package", "zzz"],
+         {2}, tails_has("package 仅支持 mbtiles / gpkg"))
 
     # ---------- C. 性能：匀色方法耗时（2024 四景，vrt 模式） ----------
     for m in ["overlap_adjust", "global_adjust", "block_wallis", "hist_match"]:

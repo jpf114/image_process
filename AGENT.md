@@ -17,7 +17,7 @@
 - **本轮（2026-10-13）独立完整复核并逐项修复**：交付包漏 workflow、workflow 未接 profile_mode/输出/目标等参数、profile_mode 无校验且 apply/recreate 缺失、target_mean/std 缺失、参数命名偏离方案、断点续跑计数重复、OpenCV 冗余依赖——详见 §6 计划表末行、§8 教训 11/12、§9 验证表。
 - 当前测试用例 **24/24 通过**（`cd build/release && ctest --output-on-failure`）。
 - **S3 Phase 4 服务化已完成（2026-10-13）**：`ip_server`（cpp-httplib 控制面 + 任务队列/状态机 + worker 进程池 fork/exec）+ REST 5 端点 + 静态瓦片 + Dockerfile（镜像已构建并容器内端到端实测）。用法见 [服务化使用说明.md](文档资料/关于栅格切片和匀色/服务化使用说明.md)，设计论证见 [Phase4服务化论证报告.md](文档资料/关于栅格切片和匀色/Phase4服务化论证报告.md)。
-- 待办：S4 MBTiles/GPKG（可选）；`num_processes` 真多进程（服务化已提供任务级并行的替代路径）。
+- 待办：`num_processes` 真多进程（服务化已提供任务级并行的替代路径）；`sample_fill` 采样填充、重叠区羽化、GPU 路径（均为方案后期项，按需启动）。
 - 测试数据：`文档资料/关于栅格切片和匀色/data/{2024,2025}`（2024 四景 2m EPSG:4490 标准图幅；2025 GF2 0.8m 极暗、33% 无效区）
 
 ## 3. 硬性规范（违反即返工）
@@ -106,6 +106,7 @@ image_process/
 | S2 单元测试 | gtest 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过；第三轮审计新增 resume 用例后 **24/24**） |
 | 第三轮审计+补测 | 三路只读审查（26 项发现）→ 修复高 5/中 9/低 12；补测：单元 24/24、验收矩阵 47/47、服务化专项 14/14、压测 13/13 | ✅ 完成（2026-10-13，见 [测试文档.md](文档资料/关于栅格切片和匀色/测试文档.md)） |
 | 复核修复 | 独立完整复核（算法/需求/测试/方案）发现缺陷逐项修复：安装漏件、workflow 参数、profile_mode 校验+apply/recreate、target_mean/std、参数别名、续跑计数、OpenCV 冗余 | ✅ 完成（2026-10-13，24/24 通过 + CLI/workflow 冒烟） |
+| S4 打包输出 | tiling `package=mbtiles\|gpkg`（GDAL 驱动逐瓦片块写、增量 UPSERT、包内元数据修正） | ✅ 完成（2026-10-13，验收矩阵 E 组 7 项；包内瓦片与散文件**逐像素一致**） |
 
 ## 7. 常用命令
 
@@ -129,6 +130,10 @@ export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
 cd build/release && ctest --output-on-failure
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
 bin/Release/workflow --config <workflow.json> [--only color|tiling]
+bin/Release/tiling --input <影像|VRT> --output-dir <目录> --tiling-scheme WebMercatorQuad \
+  --max-zoom 9 --package mbtiles          # S4 打包：单文件 MBTiles（散文件不落盘）
+bin/Release/tiling --input <影像|VRT> --output-dir <目录> --tiling-scheme CGCS2000 \
+  --min-zoom 13 --max-zoom 13 --bbox 105.30,29.02,105.32,29.04 --package gpkg
 
 # 服务化（Phase 4）：控制面 + worker 进程池；用法见《服务化使用说明.md》
 bin/Release/ip_server --data-dir ipdata --tiles-dir out/tiles --port 8080 --workers 2
@@ -173,6 +178,12 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 13. **外部环境注入 GDAL/PROJ 数据路径会打断坐标解析（实测）**：在 conda 环境（geo_env）内启动服务时，激活脚本设置 `PROJ_DATA`/`GDAL_DATA`/`GDAL_DRIVER_PATH` 指向该环境的另一套 PROJ 数据库（`LAYOUT.VERSION.MINOR=2`，与 vcpkg GDAL 3.12 不兼容）→ 切换到非 geo_env 环境或显式钉住 vcpkg 路径（`ipenv.sh`/容器 ENV/`worker_env()`）即可；若为 conda 之外的进程，须清除它设置的 `GDAL_DRIVER_PATH`。
 14. **无 overview 金字塔时切片慢 ≈213×（实测）**：同一高层级切片规模，无金字塔的镶嵌 VRT 单任务 464 瓦片耗时 **4089s（≈8.8s/瓦片）**；带 `.ovr` 时为 492 瓦片 **20.3s（≈0.041s/瓦片）**。切片任务保持 `overview_policy=auto`（默认即自建 .ovr），勿在无金字塔的 VRT 上做大规模切片。
 15. **并发与超订的定量结论（压测实测）**：匀色阶段逐景串行 → worker 并发近线性提速（1→2 worker 1.89×）；切片阶段已用满核 → worker 并发无收益且单任务线性变慢（总量守恒）；`workers × num_threads ≈ 物理核数` 时吞吐不劣于超订（实测差 0.05%）。
+16. **打包输出（S4）三条 GDAL 硬约束（实测 GDAL 3.12.4）**：
+    - **`GDALOpenEx` 实参顺序**：`(file, flags, allowedDrivers, openOptions, siblingFiles)`。把打开选项误传到第 5 位（siblingFiles）不会报错，而是**静默忽略选项**（表现为 ZOOM_LEVEL 不生效、网格恒为建包尺寸）——曾据此得出错误结论并写坏生产代码（package_sink.cpp 已修正）。
+    - **MBTiles 层级顺序**：驱动按 `tiles` 表实际内容判定，**拒绝在低于已有最小 zoom 的层级打开**（`Inconsistent values`）。故 MBTiles 建包取最浅层级、**按 z 升序逐层写入**；GPKG 无此限制（建包取最深层级以一次登记 `gpkg_tile_matrix` 0..max 全层级）。
+    - **`metadata` 写入经 OGR SQLite 驱动**：MBTiles 驱动关闭时把 minzoom/maxzoom 写成"当次句柄层级"，与包内容不符，需收尾修正；且 **OGR `ExecuteSQL` 一次只执行一条语句**（`DELETE ...; INSERT ...` 只会执行前半条）。
+17. **GPKG 的 TILING_SCHEME JSON 数值必须用 double 往返精度（`%.17g`）**：GDAL 解析时校验"相邻层级分辨率严格为 2 倍"，`%.10g` 之类的截断会触发 `Unsupported tiling scheme: resolution of consecutive zoom levels is not always 2`。
+18. **包内 zoom_level = TMS 矢量索引（0 基），非目录层级号**：GPKG/MBTiles 的 `zoom_level` 取 TILING_SCHEME JSON 中的**数组下标**（GDAL 不使用 `identifier`）。故 CGCS2000（目录层级从 1 起）包内 `zoom_level = 目录层级 − 1`；WebMercatorQuad 二者相同。`tile_row`：MBTiles 为 TMS（自下而上），GPKG 为 XYZ（自上而下），由 GDAL 自行换算。
 
 ## 9. 迭代 2 与 Phase 2 验证结果（2026-10-13）
 
@@ -196,6 +207,9 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **S3 服务化（Phase 4）** | 端到端：POST 提交 → 进度 10→85→100 → done → 经 `GET /tiles/...` 取瓦片（HTTP 200/30837B）；并发：workers=1 时 A=running / B=queued；**崩溃隔离**：kill -9 worker → 任务 failed(137)、服务 health 200、队列自动续跑下一任务；取消：DELETE running → canceled；优雅退出：SIGTERM → "开始优雅退出"；重启恢复：运行中任务重启后标 `failed/服务重启中断`（可重提交），历史任务从磁盘恢复 |
 | **S3 容器化** | 镜像 268MB（ubuntu:24.04 + dist 包 + tini + tzdata）；容器内提交→done(9.5s，1 瓦片)→宿主卷可见→`GET /tiles/…` 200/30837B；`docker stop` 由 tini 转发 SIGTERM 触发优雅退出。**实测约束**：基础镜像须不旧于构建机 glibc（debian:12 报 `GLIBC_2.38 not found`）；TZ 需 tzdata |
 | **S3 压测（4.5）** | 7 场景/13 任务全 done：[Phase4压测报告.md](文档资料/关于栅格切片和匀色/Phase4压测报告.md)。匀色为主的任务 worker 1→2 **1.89×**（118.2→62.6s）；切片密集任务 worker 并发**无收益**（41.87→42.55s，单任务 20.3→42.2s）；超订(2×nt4) vs 匹配(2×nt2) **差 0.05%**→ 规则 `workers × num_threads ≈ 核数`；峰值 RSS 匀色 680MB / GF2 全图 932MB / tiling-only 52–61MB（块式恒定内存验证）；297 次 health 采样 **0 失败**、p95 0.4–8.4ms；7 次优雅退出 exit=0 |
+| **S4 打包（MBTiles）** | 标准 MBTiles 1.1 schema（`tiles(zoom_level,tile_column,tile_row,tile_data)` 唯一索引）；z0~z9 共 10 瓦片；`metadata.minzoom/maxzoom` 由收尾修正为 0/9（驱动自写值不可信）；10 张瓦片与散文件 PNG **最大差 0** |
+| **S4 打包（GPKG）** | `gpkg_tile_matrix` 登记 0~12 全层级（CGCS2000 目录层 13 → 包内 zoom_level 12）、`gpkg_tile_matrix_set` srs_id=4490 / min(-180,-90) max(180,90)；瓦片与散文件 **最大差 0**；GDAL 读回 2097152×1048576×4 波段 |
+| **S4 增量追加** | 同 bbox 二次运行 → 瓦片数不变（UPSERT）；相邻 bbox → 1→2 张，包体持续可用 |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 

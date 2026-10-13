@@ -15,7 +15,8 @@
 //     "input": "",              // 留空 = 自动接匀色镶嵌 VRT
 //     "output_dir": "out/tiles",
 //     "tiling_scheme": "CGCS2000", "min_zoom": 10, "max_zoom": 14,
-//     "format": "png", "build_overviews": "auto"
+//     "format": "png", "build_overviews": "auto",
+//     "package": "gpkg"          // 可选：mbtiles|gpkg 打包单文件（空=散文件）
 //   }
 // }
 #include "color_balance/i_color_balance.h"
@@ -186,6 +187,9 @@ int main(int argc, char** argv) {
         if (jt.contains("overwrite")) p.overwrite = jt["overwrite"].get<bool>();
         if (jt.contains("keep_tmp_vrt")) p.keep_tmp_vrt = jt["keep_tmp_vrt"].get<bool>();
         if (jt.contains("use_gpu")) p.use_gpu = jt["use_gpu"].get<bool>();
+        if (jt.contains("package")) p.package = jt["package"].get<std::string>();
+        if (jt.contains("package_file"))
+            p.package_file = jt["package_file"].get<std::string>();
         if (jt.contains("min_mem_gb")) p.min_mem_gb = jt["min_mem_gb"].get<double>();
 
         iptl::ITiling* tl = createTiling();

@@ -215,7 +215,9 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
         (fs::path(dir) / (std::to_string(tyXYZ) + ext)).string();
 
     // 0. 断点续跑：已存在且不强制覆盖 → 跳过（返回 4，与"写出"区分计数）
-    if (ctx.resume && !ctx.overwrite && fs::exists(fs::path(path))) {
+    //    包模式下无散文件可比对，写入走 UPSERT 语义（重复写覆盖同一行）
+    if (ctx.sink == nullptr && ctx.resume && !ctx.overwrite &&
+        fs::exists(fs::path(path))) {
         return 4;
     }
 
@@ -250,7 +252,10 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
         }
     }
 
-    // 6. 编码写出
+    // 6. 编码写出（散文件）或写入瓦片包
+    if (ctx.sink != nullptr) {
+        return ctx.sink->write(dirLevel, tx, tyXYZ, tile.data(), err) ? 0 : -1;
+    }
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (!encodeTile(tile, ctx.nBands, S, ctx, path, err)) return -1;

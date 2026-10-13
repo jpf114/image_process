@@ -31,6 +31,8 @@ void usage() {
            "  --build-overviews <auto|yes|no>          无 ovr 时自动建（低 zoom 提速）\n"
            "  --overview-policy <auto|yes|no>          build-overviews 的等价别名（方案 §5.2）\n"
            "  --bbox <minX,minY,maxX,maxY>             增量范围（TMS CRS 坐标；给出即增量切片）\n"
+           "  --package <mbtiles|gpkg>                 打包输出单文件（不落散文件）\n"
+           "  --package-file <路径>                    包文件路径（默认 <output-dir>/tiles.<包格式>）\n"
            "  --no-resume                              忽略已存在瓦片（默认续跑跳过）\n"
            "  --overwrite                              强制重写已存在瓦片\n"
            "  --keep-tmp-vrt                           保留 WarpedVRT（调试）\n"
@@ -101,6 +103,10 @@ int main(int argc, char** argv) {
             p.build_overviews = need("--overview-policy");  // 方案 §5.2 等价别名
         } else if (a == "--bbox") {
             p.bbox = need("--bbox");
+        } else if (a == "--package") {
+            p.package = need("--package");
+        } else if (a == "--package-file") {
+            p.package_file = need("--package-file");
         } else if (a == "--no-resume") {
             p.resume = false;
         } else if (a == "--overwrite") {

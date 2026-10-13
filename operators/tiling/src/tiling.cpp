@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 
 namespace fs = std::filesystem;
@@ -71,6 +72,32 @@ public:
                 return false;
             }
         }
+        // 打包参数（S4）：包格式、TMS 兼容性、块尺寸、包路径默认值
+        if (!params_.package.empty() && params_.package != "mbtiles" &&
+            params_.package != "gpkg") {
+            err = "package 仅支持 mbtiles / gpkg（空=输出散文件）";
+            return false;
+        }
+        if (!params_.package.empty()) {
+            if (!resolveTms(params_.tiling_scheme, tms_, err)) return false;
+            if (params_.package == "mbtiles" && tms_.id != "WebMercatorQuad") {
+                // MBTiles 规范未定义自定义 TMS；非全球墨卡托包会被标准客户端误读
+                err = "package=mbtiles 仅支持 tiling_scheme=WebMercatorQuad"
+                      "（MBTiles 规范限定全球墨卡托），当前为 " + tms_.id;
+                return false;
+            }
+            if (params_.tile_size != 256) {
+                err = "打包模式下 tile_size 须为 256（包内瓦片矩阵按 256 定义）";
+                return false;
+            }
+            if (params_.package_file.empty()) {
+                // 包文件扩展名固定为包格式（与 format 无关，内容是包而非图片）
+                params_.package_file =
+                    (fs::path(params_.output_dir) /
+                     (std::string("tiles.") + params_.package))
+                        .string();
+            }
+        }
         return true;
     }
 
@@ -120,8 +147,10 @@ private:
         }
         ip::MemGuard::checkOrThrow(params_.min_mem_gb, "开始");
 
-        // 1. TMS
-        if (!resolveTms(params_.tiling_scheme, tms_, err)) return false;
+        // 1. TMS（打包模式下 configure 已解析并校验，避免重复读自定义 JSON）
+        if (tms_.levelCount() == 0 && !resolveTms(params_.tiling_scheme, tms_, err)) {
+            return false;
+        }
         ip::logInfo("TMS: " + tms_.id + " EPSG:" + std::to_string(tms_.epsg) +
                     " 层级数 " + std::to_string(tms_.levelCount()) +
                     "（目录层级 " + fmtL(tms_.dirLevel(0)) + " 起）");
@@ -219,6 +248,9 @@ private:
             long long tx, ty;  // xyz
         };
         std::vector<TileJob> jobs;
+        // 每层级任务在 jobs 中的区间（jobs 按 z 升序生成）——打包模式需逐层
+        // 升序提交（MBTiles 驱动不允许回退到更浅层级），同时限制在途任务数
+        std::vector<std::pair<int, std::pair<size_t, size_t>>> levelRanges;
         for (int z = minZ; z <= maxZ; ++z) {
             long long tx0, ty0, tx1, ty1;
             if (!levelTileRange(tms_, z, params_.tile_size, params_.tile_size,
@@ -236,10 +268,14 @@ private:
                 ty1 = std::min<long long>(ty1 + buf,
                                           tms_.level(z).matrixH - 1);
             }
+            const size_t begin = jobs.size();
             for (long long ty = ty0; ty <= ty1; ++ty) {
                 for (long long tx = tx0; tx <= tx1; ++tx) {
                     jobs.push_back({z, tx, ty});
                 }
+            }
+            if (jobs.size() > begin) {
+                levelRanges.push_back({z, {begin, jobs.size()}});
             }
         }
         ip::logInfo("候选瓦片 " + std::to_string(jobs.size()) + " 张");
@@ -261,6 +297,25 @@ private:
         ctx.dataExtent = extent;
         ctx.resume = params_.resume;
         ctx.overwrite = params_.overwrite;
+        ctx.outBands = (params_.format == "jpeg" || ctx.nBands < 4) ? 3 : 4;
+        if (params_.format == "jpeg") ctx.outBands = 3;
+
+        // 6.5 打包 sink（S4）：包模式不再落散文件，瓦片直接写入包
+        std::unique_ptr<TileSink> sink;
+        if (!params_.package.empty()) {
+            if (levelRanges.empty()) {
+                ip::logWarn("无候选瓦片，跳过建包");
+            } else {
+                const int firstIdx = levelRanges.front().first;
+                const int lastIdx = levelRanges.back().first;
+                TileSink* raw = createPackageSink(params_, tms_, firstIdx, lastIdx,
+                                                  ctx.outBands, params_.tile_size,
+                                                  err);
+                if (raw == nullptr) return false;
+                sink.reset(raw);
+                ctx.sink = sink.get();
+            }
+        }
 
         // 7. 线程池并行渲染
         const int threads = params_.num_threads > 0
@@ -273,61 +328,76 @@ private:
         std::mutex errMutex;
         std::atomic<bool> failed{false};
         std::string firstErr;
-        std::vector<std::future<void>> futs;
-        futs.reserve(jobs.size());
         const int total = static_cast<int>(jobs.size());
 
-        for (const auto& job : jobs) {
-            futs.push_back(pool.submit([&]() {
-                if (failed.load()) return;
-                GDALDataset* wds = threadLocalWarpDs(warpVrt);
-                if (!wds) {
+        // 单张瓦片的渲染与计数
+        auto runJob = [&](const TileJob& job) {
+            if (failed.load()) return;
+            GDALDataset* wds = threadLocalWarpDs(warpVrt);
+            if (!wds) {
+                std::lock_guard<std::mutex> lk(errMutex);
+                if (!failed.exchange(true)) firstErr = "线程打开 warp VRT 失败";
+                return;
+            }
+            const TileBbox bbox = tileBbox(tms_, job.levelIdx, job.tx,
+                                           job.ty, params_.tile_size,
+                                           params_.tile_size);
+            const int dirLevel = tms_.dirLevel(job.levelIdx);
+            const long long tyOut = params_.convention == "xyz"
+                                        ? job.ty
+                                        : (tms_.level(job.levelIdx).matrixH - 1 - job.ty);
+            std::string terr;
+            const int rc = renderTile(wds, bbox, ctx,
+                                      tms_.level(job.levelIdx).res, dirLevel,
+                                      job.tx, tyOut, terr);
+            switch (rc) {
+                case 0: written++; break;
+                case 1: skipEmpty++; break;
+                case 2: skipTh++; break;
+                case 3: outside++; break;
+                case 4: resumed++; break;
+                default:
                     std::lock_guard<std::mutex> lk(errMutex);
-                    if (!failed.exchange(true)) firstErr = "线程打开 warp VRT 失败";
+                    if (!failed.exchange(true)) firstErr = terr;
                     return;
-                }
-                const TileBbox bbox = tileBbox(tms_, job.levelIdx, job.tx,
-                                               job.ty, params_.tile_size,
-                                               params_.tile_size);
-                const int dirLevel = tms_.dirLevel(job.levelIdx);
-                const long long tyOut = params_.convention == "xyz"
-                                            ? job.ty
-                                            : (tms_.level(job.levelIdx).matrixH - 1 - job.ty);
-                std::string terr;
-                const int rc = renderTile(wds, bbox, ctx,
-                                          tms_.level(job.levelIdx).res,
-                                          dirLevel, job.tx, tyOut, terr);
-                switch (rc) {
-                    case 0: written++; break;
-                    case 1: skipEmpty++; break;
-                    case 2: skipTh++; break;
-                    case 3: outside++; break;
-                    case 4: resumed++; break;
-                    default:
-                        std::lock_guard<std::mutex> lk(errMutex);
-                        if (!failed.exchange(true)) firstErr = terr;
-                        return;
-                }
-                const int d = ++done;
-                if (d % std::max(1, total / 20) == 0 || d == total) {
-                    const int pct = 10 + static_cast<int>(85.0 * d / total);
-                    report(cb, pct, "瓦片进度 " + std::to_string(d) + "/" +
-                                        std::to_string(total));
-                }
-            }));
+            }
+            const int d = ++done;
+            if (d % std::max(1, total / 20) == 0 || d == total) {
+                const int pct = 10 + static_cast<int>(85.0 * d / total);
+                report(cb, pct, "瓦片进度 " + std::to_string(d) + "/" +
+                                    std::to_string(total));
+            }
+        };
+        // 提交区间 [begin,end) 的任务并等待
+        auto runRange = [&](size_t begin, size_t end) {
+            std::vector<std::future<void>> futs;
+            futs.reserve(end - begin);
+            for (size_t i = begin; i < end; ++i) {
+                futs.push_back(pool.submit([&, i]() { runJob(jobs[i]); }));
+            }
+            for (auto& f : futs) f.get();
+        };
+
+        if (sink == nullptr) {
+            runRange(0, jobs.size());
+        } else {
+            // 打包模式：逐层升序提交（MBTiles 驱动限制），且在途任务数有界
+            for (const auto& r : levelRanges) {
+                runRange(r.second.first, r.second.second);
+                if (failed.load()) break;
+            }
         }
-        // 等待全部任务完成
-        for (auto& f : futs) f.get();
         if (failed.load()) {
             err = firstErr;
             return false;
         }
+        // 收尾打包（关闭句柄、补写包元数据）
+        if (sink != nullptr && !sink->finish(err)) return false;
 
-        // 8. 清理临时 VRT
+        // 8. 清理临时 VRT（remove_all：_tmp 下还有打包用的 TMS JSON，空目录删除会失败）
         if (!params_.keep_tmp_vrt) {
             std::error_code ec;
-            fs::remove(warpVrt, ec);
-            fs::remove(fs::path(tmpDir), ec);
+            fs::remove_all(fs::path(tmpDir), ec);
         }
 
         stats.tilesWritten = written;
@@ -340,6 +410,9 @@ private:
                 .count();
         report(cb, 100, "切片完成");
         ip::logInfo("==== 切片结果 ====");
+        if (!params_.package.empty()) {
+            ip::logInfo("  包（" + params_.package + "）: " + params_.package_file);
+        }
         ip::logInfo("  写出 " + std::to_string(written) + "，续跑跳过 " +
                     std::to_string(resumed) + "，跳过(全无效) " +
                     std::to_string(skipEmpty) + "，跳过(阈值) " +

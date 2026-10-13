@@ -107,6 +107,12 @@ bool parseTmsJson(const std::string& jsonPath, TileMatrixSet& tms,
     }
 }
 
+double scaleDenominator(const TileMatrixLevel& level, bool geographic) {
+    // 与 parseTmsJson 互为逆运算：res = scale * OGC_PIXEL_M（地理坐标再除 M_PER_DEG）
+    const double spanM = geographic ? level.res * M_PER_DEG : level.res;
+    return spanM / OGC_PIXEL_M;
+}
+
 bool resolveTms(const std::string& nameOrPath, TileMatrixSet& tms,
                 std::string& err) {
     if (nameOrPath == "WebMercatorQuad") {

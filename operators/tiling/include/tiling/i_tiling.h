@@ -42,9 +42,16 @@ struct TilingParams {
     std::string bbox;                  // 增量范围 "minX,minY,maxX,maxY"（空=全量，源 SRS 坐标）
                                        // 增量切片由 bbox 承载（等价方案 §5.2 的 tiles_scope=footprint；
                                        // 未单独暴露 tiles_scope，避免空转参数）
-    bool resume = true;                // 断点续跑：已存在瓦片跳过
+    bool resume = true;                // 断点续跑：已存在瓦片跳过（仅散文件模式）
     bool overwrite = false;            // true 时强制重写已存在瓦片
     bool use_gpu = false;              // GPU 占位（本期纯 CPU，开启仅告警）
+
+    // 打包输出（S4）：空=散文件 <out>/<z>/<x>/<y>.<ext>；否则写单文件瓦片包
+    //   mbtiles —— SQLite 单文件，规范限定全球墨卡托（tiling_scheme 须为 WebMercatorQuad）
+    //   gpkg    —— OGC GeoPackage，支持任意 TMS
+    // 包模式与散文件互斥：设置后不再落散文件，瓦片直接写入包
+    std::string package;
+    std::string package_file;          // 包文件路径（空 → <output_dir>/tiles.<ext>）
 };
 
 using ProgressCallback = std::function<void(int percent, const std::string& msg)>;
