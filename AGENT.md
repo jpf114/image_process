@@ -16,7 +16,8 @@
 - **Phase 0（Python 验证）6/6 PASS**；**Phase 1（core+color_balance）→ Phase 2（tiling）→ Phase 3（apps+workflow）全部完成并数据级验证**；S1 差距补齐、S2 单元测试（gtest）完成。
 - **本轮（2026-10-13）独立完整复核并逐项修复**：交付包漏 workflow、workflow 未接 profile_mode/输出/目标等参数、profile_mode 无校验且 apply/recreate 缺失、target_mean/std 缺失、参数命名偏离方案、断点续跑计数重复、OpenCV 冗余依赖——详见 §6 计划表末行、§8 教训 11/12、§9 验证表。
 - 当前测试用例 **24/24 通过**（`cd build/release && ctest --output-on-failure`）。
-- 待办：S3 Phase 4 服务化（《后续执行方案》§二）、S4 MBTiles/GPKG。
+- **S3 Phase 4 服务化已完成（2026-10-13）**：`ip_server`（cpp-httplib 控制面 + 任务队列/状态机 + worker 进程池 fork/exec）+ REST 5 端点 + 静态瓦片 + Dockerfile；已验证提交/进度/取消/崩溃隔离/优雅退出/重启恢复。用法见 [服务化使用说明.md](文档资料/关于栅格切片和匀色/服务化使用说明.md)，设计论证见 [Phase4服务化论证报告.md](文档资料/关于栅格切片和匀色/Phase4服务化论证报告.md)。
+- 待办：S4 MBTiles/GPKG（可选）；`num_processes` 真多进程（服务化已提供任务级并行的替代路径）。
 - 测试数据：`文档资料/关于栅格切片和匀色/data/{2024,2025}`（2024 四景 2m EPSG:4490 标准图幅；2025 GF2 0.8m 极暗、33% 无效区）
 
 ## 3. 硬性规范（违反即返工）
@@ -51,7 +52,7 @@
 - **交付形态默认动态库**：operator 为 .so（如 libip_color_balance.so），core 为内部静态库并入动态库（不单独交付）；后续按需支持静态库
 - **安装默认 Release**：`cmake --install build/release --prefix <dir>`；打包用 `scripts/package_release.sh`——自动构建 Release → install → **递归收集全部动态依赖 so**（排除系统库）→ 拷贝 GDAL_DATA/PROJ 数据 → 生成 bin/ipenv.sh 启动脚本 → tar.gz，可直接带走解压使用（假设目标机 x86_64 且 glibc 不旧于构建机）
 - 所有文本文件 **UTF-8（无 BOM）+ LF**，禁止 CRLF
-- **第三方依赖仅 GDAL + nlohmann-json**（vcpkg.json 同）。**OpenCV 经完整评估不引入**：其优势（imgproc 滤波/稠密线代/CUDA）在本项目未被使用（融合羽化未实现、解算规模过小、无 GPU 环境），唯一理论受益点 `cv::LUT` 处非瓶颈；完整论证与再引入条件见《技术方案》§3.6
+- **第三方依赖仅 GDAL + nlohmann-json + cpp-httplib**（vcpkg.json 同）。cpp-httplib（header-only，0.51.0）仅用于服务化控制面（`ip_server`）。**OpenCV 经完整评估不引入**：其优势（imgproc 滤波/稠密线代/CUDA）在本项目未被使用（融合羽化未实现、解算规模过小、无 GPU 环境），唯一理论受益点 `cv::LUT` 处非瓶颈；完整论证与再引入条件见《技术方案》§3.6
 - GPU：`IP_ENABLE_GPU` CMake option（默认 OFF，仅暴露编译宏）+ `use_gpu` 运行参数（占位，GPU 路径未实现）
 - Python 一律用 conda `geo_env`（GDAL 3.11.4 + OpenCV 4.13），禁止 base 环境、禁止先 pip
 - 不私自下载/安装任何库，需先征得用户同意
@@ -80,10 +81,11 @@
 image_process/
 ├── AGENT.md            # 本文件
 ├── CMakeLists.txt      # 顶层 C++17 + vcpkg toolchain
-├── vcpkg.json          # 依赖清单（gdal、nlohmann-json）
+├── vcpkg.json          # 依赖清单（gdal、nlohmann-json、cpp-httplib）
 ├── core/               # 公共基础（静态库）
 ├── operators/          # 功能动态库：color_balance、tiling（含 data/tms_CGCS2000.json 分发件）
-├── apps/               # exe 薄壳
+├── apps/               # exe 薄壳（+ server/：ip_server 服务化控制面）
+├── docker/             # Dockerfile（Phase 4 容器化）
 ├── scripts/phase0/     # Python 验证脚本（geo_env）
 ├── output/phase0/      # Phase 0 证据（bench/tms/white_tiles/color）
 └── 文档资料/           # 需求、方案、报告、测试数据
@@ -99,7 +101,7 @@ image_process/
 | Phase 2 | tiling operator：TMS 三内置+JSON、WarpedVRT+线程池并行、nodata 模式、png/jpeg/webp | ✅ 核心完成并验证（CGCS2000 格网与 GDAL CLI 逐级一致；GF2 透明对策一致） |
 | Phase 2 收尾 | 性能优化（overview 利用）、MBTiles/GPKG 打包、tiles_scope 增量切片 | ✅ auto overview/bbox/tile_buffer 已实现；MBTiles/GPKG 见《后续执行方案》S4 |
 | Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | ✅ 完成 |
-| Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | 待启动（设计见《后续执行方案》§二） |
+| Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | ✅ 完成（2026-10-13；见《服务化使用说明.md》） |
 | S1 差距补齐 | 方案承诺项闭环（每景 COG/镶嵌 COG/append 增量/参数补齐） | ✅ 完成（2026-10-13） |
 | S2 单元测试 | gtest 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过 + 真实影像冒烟） |
 | 复核修复 | 独立完整复核（算法/需求/测试/方案）发现缺陷逐项修复：安装漏件、workflow 参数、profile_mode 校验+apply/recreate、target_mean/std、参数别名、续跑计数、OpenCV 冗余 | ✅ 完成（2026-10-13，24/24 通过 + CLI/workflow 冒烟） |
@@ -126,6 +128,14 @@ export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
 cd build/release && ctest --output-on-failure
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
 bin/Release/workflow --config <workflow.json> [--only color|tiling]
+
+# 服务化（Phase 4）：控制面 + worker 进程池；用法见《服务化使用说明.md》
+bin/Release/ip_server --data-dir ipdata --tiles-dir out/tiles --port 8080 --workers 2
+curl -X POST -H 'Content-Type: application/json' --data-binary @job.json \
+  http://127.0.0.1:8080/api/v1/jobs        # job.json 与 workflow --config 同构
+curl http://127.0.0.1:8080/api/v1/jobs/<id>          # 状态/进度
+curl http://127.0.0.1:8080/api/v1/jobs/<id>/logs     # 日志
+curl -X DELETE http://127.0.0.1:8080/api/v1/jobs/<id>  # 取消
 
 # 运行日志：自动落盘 <output_dir>/logs/run_<operator>_<时间戳>.log（每次处理一个文件）
 
@@ -179,6 +189,7 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **apply 模式** | 按既有方案冻结参数生成匀色 VRT（方案 JSON 不被修改，mtime/大小不变）；4 景 gain=1.00 恒等保持；CLI 与 workflow（`profile_mode=apply`）双通道验证通过 |
 | **target_mean/std** | global_adjust 显式目标 μ=100/110/90、σ=40/35/30：3 景 gain 与 σ_t/σ 逐波段一致（误差 <1e-6，参考景按设计恒等）；workflow JSON 数字/数组两种写法均解析通过 |
 | **workflow 参数与交付** | workflow 现解析 profile_mode/scene_format/mosaic_cog/target/wallis_target_std/cache_mb/tile_buffer/num_processes/use_gpu/keep_tmp_vrt/tiles_scope/overview_policy；`cmake --install` 现含 tiling/workflow/libip_tiling.so + share/gdal/tms_CGCS2000.json |
+| **S3 服务化（Phase 4）** | 端到端：POST 提交 → 进度 10→85→100 → done → 经 `GET /tiles/...` 取瓦片（HTTP 200/30837B）；并发：workers=1 时 A=running / B=queued；**崩溃隔离**：kill -9 worker → 任务 failed(137)、服务 health 200、队列自动续跑下一任务；取消：DELETE running → canceled；优雅退出：SIGTERM → "开始优雅退出"；重启恢复：运行中任务重启后标 `failed/服务重启中断`（可重提交），历史任务从磁盘恢复 |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 
