@@ -29,7 +29,9 @@ void usage() {
            "  --tile-buffer <0>                        增量切片外扩缓冲瓦片数\n"
            "  --use-gpu                                GPU 占位（本期纯 CPU，仅告警）\n"
            "  --build-overviews <auto|yes|no>          无 ovr 时自动建（低 zoom 提速）\n"
+           "  --overview-policy <auto|yes|no>          build-overviews 的等价别名（方案 §5.2）\n"
            "  --bbox <minX,minY,maxX,maxY>             增量范围（TMS CRS 坐标，空=全量）\n"
+           "  --tiles-scope <full|footprint>           默认 full；footprint=增量（需配合 bbox）\n"
            "  --no-resume                              忽略已存在瓦片（默认续跑跳过）\n"
            "  --overwrite                              强制重写已存在瓦片\n"
            "  --keep-tmp-vrt                           保留 WarpedVRT（调试）\n"
@@ -96,8 +98,12 @@ int main(int argc, char** argv) {
             p.use_gpu = true;
         } else if (a == "--build-overviews") {
             p.build_overviews = need("--build-overviews");
+        } else if (a == "--overview-policy") {
+            p.build_overviews = need("--overview-policy");  // 方案 §5.2 等价别名
         } else if (a == "--bbox") {
             p.bbox = need("--bbox");
+        } else if (a == "--tiles-scope") {
+            p.tiles_scope = need("--tiles-scope");
         } else if (a == "--no-resume") {
             p.resume = false;
         } else if (a == "--overwrite") {

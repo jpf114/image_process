@@ -15,10 +15,17 @@ void usage() {
            "  [选项]\n"
            "  --method <overlap_adjust|overlap_adjust+wallis|block_wallis|hist_match|global_adjust>\n"
            "                                           默认 overlap_adjust\n"
-           "  --output-mode <tif|vrt>                  vrt=匀色 VRT+镶嵌 VRT（零像素落盘）\n"
+           "  --output-mode <vrt|cog_mosaic|per_scene_cog|tif>\n"
+           "                                           vrt=匀色 VRT+镶嵌 VRT（默认，零像素落盘）\n"
            "  --scene-format <gtiff|cog>               每景物理输出布局（默认 gtiff）\n"
            "  --mosaic-cog                             vrt 模式下额外输出物理镶嵌 COG\n"
+           "  --profile-mode <create|append|apply|recreate>\n"
+           "                                           create=新建（默认）| append=追加新景并解参\n"
+           "                                           apply=仅按既有方案处理给定影像（参数冻结）\n"
+           "                                           recreate=全局重算（等价 create 全量）\n"
            "  --ref-image <路径>                       参考影像（默认排序后第一景）\n"
+           "  --target-mean <v|r,g,b>                  目标均值（优先级高于 ref_image）\n"
+           "  --target-std <v|r,g,b>                   目标标准差（优先级高于 ref_image）\n"
            "  --seam-threshold <2.0>                   接边一致性阈值（|Δμ| 低于则跳过调节）\n"
            "  --min-overlap-px <8>                     重叠窗口最小边长（像素）\n"
            "  --overlap-max-side <2048>                重叠区统计采样上限（tile 采样，控内存）\n"
@@ -30,6 +37,31 @@ void usage() {
            "  --no-profile                             不写方案文件\n"
            "  --min-mem-gb <1.5>                       内存护栏阈值\n"
            "  -h | --help\n";
+}
+
+} // namespace
+
+namespace {
+
+// 解析 "v" 或 "r,g,b"（1 或 3 个值）为数值列表
+bool parseNumList(const std::string& s, std::vector<double>& out) {
+    out.clear();
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        const size_t comma = s.find(',', pos);
+        const std::string tok = s.substr(pos, comma == std::string::npos
+                                                 ? std::string::npos
+                                                 : comma - pos);
+        if (tok.empty()) return false;
+        try {
+            out.push_back(std::stod(tok));
+        } catch (...) {
+            return false;
+        }
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return out.size() == 1 || out.size() == 3;
 }
 
 } // namespace
@@ -59,6 +91,16 @@ int main(int argc, char** argv) {
             p.method = need("--method");
         } else if (a == "--ref-image") {
             p.ref_image = need("--ref-image");
+        } else if (a == "--target-mean") {
+            if (!parseNumList(need("--target-mean"), p.target_mean)) {
+                std::cerr << "--target-mean 需为 1 个值或 3 个逗号分隔值" << std::endl;
+                return 2;
+            }
+        } else if (a == "--target-std") {
+            if (!parseNumList(need("--target-std"), p.target_std)) {
+                std::cerr << "--target-std 需为 1 个值或 3 个逗号分隔值" << std::endl;
+                return 2;
+            }
         } else if (a == "--seam-threshold") {
             p.seam_check_threshold = std::atof(need("--seam-threshold"));
         } else if (a == "--min-overlap-px") {

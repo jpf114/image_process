@@ -274,10 +274,10 @@ int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
     const std::string path =
         (fs::path(dir) / (std::to_string(tyXYZ) + ext)).string();
 
-    // 0. 断点续跑：已存在且不强制覆盖 → 跳过（计入 resumed）
+    // 0. 断点续跑：已存在且不强制覆盖 → 跳过（返回 4，与"写出"区分计数）
     if (ctx.resume && !ctx.overwrite && fs::exists(fs::path(path))) {
         ctx.resumed++;
-        return 0;
+        return 4;
     }
 
     // 4. 无效占比判定

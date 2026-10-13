@@ -56,6 +56,19 @@ public:
             err = "nodata_pct_threshold 取值 0~100";
             return false;
         }
+        if (params_.tiles_scope != "full" && params_.tiles_scope != "footprint") {
+            err = "tiles_scope 仅支持 full / footprint";
+            return false;
+        }
+        if (params_.tiles_scope == "footprint" && params_.bbox.empty()) {
+            err = "tiles_scope=footprint 需同时给出增量范围 bbox";
+            return false;
+        }
+        if (params_.build_overviews != "auto" && params_.build_overviews != "yes" &&
+            params_.build_overviews != "no") {
+            err = "overview_policy/build_overviews 仅支持 auto / yes / no";
+            return false;
+        }
         return true;
     }
 
@@ -94,7 +107,11 @@ private:
         // 块缓存与 GPU 占位
         GDALSetCacheMax(static_cast<int>(params_.cache_mb * 1024));  // KB
         if (params_.use_gpu) {
-            ip::logWarn("use_gpu=true 但本期为纯 CPU 实现（接口占位），按 CPU 执行");
+#if defined(IP_ENABLE_GPU)
+            ip::logWarn("use_gpu=true 且已启用 IP_ENABLE_GPU，但 GPU 路径尚未实现，按 CPU 执行");
+#else
+            ip::logWarn("use_gpu=true 但未以 IP_ENABLE_GPU 编译（本期纯 CPU），按 CPU 执行");
+#endif
         }
         if (params_.num_processes > 1) {
             ip::logWarn("num_processes>1 的多进程并行随 Phase 4 服务化提供，V1 按单进程执行");
@@ -253,6 +270,7 @@ private:
         ip::logInfo("线程数 " + std::to_string(threads));
         ip::ThreadPool pool(static_cast<size_t>(threads));
         std::atomic<long> written{0}, skipEmpty{0}, skipTh{0}, outside{0}, done{0};
+        std::atomic<long> resumed{0};
         std::mutex errMutex;
         std::atomic<bool> failed{false};
         std::string firstErr;
@@ -285,6 +303,7 @@ private:
                     case 1: skipEmpty++; break;
                     case 2: skipTh++; break;
                     case 3: outside++; break;
+                    case 4: resumed++; break;
                     default:
                         std::lock_guard<std::mutex> lk(errMutex);
                         if (!failed.exchange(true)) firstErr = terr;
@@ -313,7 +332,7 @@ private:
         }
 
         stats.tilesWritten = written;
-        stats.tilesResumed = static_cast<long>(ctx.resumed.load());
+        stats.tilesResumed = resumed;
         stats.tilesSkippedEmpty = skipEmpty;
         stats.tilesSkippedThreshold = skipTh;
         stats.tilesOutsideData = outside;
@@ -323,7 +342,7 @@ private:
         report(cb, 100, "切片完成");
         ip::logInfo("==== 切片结果 ====");
         ip::logInfo("  写出 " + std::to_string(written) + "，续跑跳过 " +
-                    std::to_string(ctx.resumed.load()) + "，跳过(全无效) " +
+                    std::to_string(resumed) + "，跳过(全无效) " +
                     std::to_string(skipEmpty) + "，跳过(阈值) " +
                     std::to_string(skipTh) + "，数据外 " +
                     std::to_string(outside) + "，耗时 " +

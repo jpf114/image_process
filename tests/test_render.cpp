@@ -172,6 +172,32 @@ TEST(RenderTile, SkipEmptyTile) {
     EXPECT_FALSE(std::filesystem::exists(tilePath(2, 1, 2)));
 }
 
+TEST(RenderTile, ResumeSkipsExisting) {
+    // 断点续跑：已存在瓦片返回 4（与"写出"0 区分——避免统计重复计数）
+    auto src = makeSrc(true);
+    const iptl::TileMatrixSet tms = iptl::makeWebMercatorQuad(24);
+    double res = 0;
+    ip::GeoExtent ext;
+    std::string err;
+    ASSERT_TRUE(iptl::buildWarpedVrt(src.get(), tms, "bilinear",
+                                     "/tmp/ip_test_render/warp5.vrt", res, ext,
+                                     err))
+        << err;
+    GDALDataset* warpDs = iptl::threadLocalWarpDs("/tmp/ip_test_render/warp5.vrt");
+    ASSERT_NE(warpDs, nullptr);
+
+    iptl::RenderCtx ctx;
+    makeCtx(ctx, tms, 2, ext, /*skipEmpty=*/true, false);
+    ctx.resume = true;
+    const iptl::TileBbox bbox = iptl::tileBbox(tms, 2, 1, 1, 256, 256);
+    std::error_code ec;
+    std::filesystem::remove(tilePath(2, 1, 1), ec);
+    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 1, err), 0);
+    // 第二次：已存在 → 4，且不重复计为写出
+    EXPECT_EQ(iptl::renderTile(warpDs, bbox, ctx, ctx.levelRes, 2, 1, 1, err), 4);
+    EXPECT_EQ(ctx.resumed.load(), 1);
+}
+
 TEST(RenderTile, FillMode) {
     auto src = makeSrc(true);  // 世界 x>0 部分无效 → fill 模式下填 fill_value
     const iptl::TileMatrixSet tms = iptl::makeWebMercatorQuad(24);

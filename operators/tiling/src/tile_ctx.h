@@ -46,7 +46,8 @@ struct RenderCtx {
     std::atomic<long long> resumed{0};  // 续跑跳过计数
 };
 
-// 渲染并写出一张瓦片；返回值：0=写出，1=跳过（空），2=跳过（阈值），3=数据外，-1=错误
+// 渲染并写出一张瓦片；返回值：
+//   0=写出，1=跳过（全无效），2=跳过（阈值），3=数据外，4=续跑跳过（已存在），-1=错误
 int renderTile(GDALDataset* warpDs, const TileBbox& bbox, RenderCtx& ctx,
                double levelRes, int dirLevel, long long tx, long long tyXYZ,
                std::string& err);

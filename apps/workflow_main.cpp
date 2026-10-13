@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -36,6 +37,18 @@ void usage() {
            "\n配置 JSON 结构见项目 AGENT.md §7 或源码头部注释。\n"
            "  --only color    仅执行匀色\n"
            "  --only tiling   仅执行切片（tiling.input 须在配置中给出）\n";
+}
+
+// 从 JSON 读数值列表（数字 → 1 值；数组 → 3 值），供 target_mean/std
+void readNumList(const ip::Json& j, const char* key, std::vector<double>& out) {
+    if (!j.contains(key)) return;
+    const auto& v = j[key];
+    if (v.is_number()) {
+        out = {v.get<double>()};
+    } else if (v.is_array()) {
+        out.clear();
+        for (const auto& e : v) out.push_back(e.get<double>());
+    }
 }
 
 } // namespace
@@ -95,10 +108,22 @@ int main(int argc, char** argv) {
         if (jc.contains("output_dir")) p.output_dir = jc["output_dir"].get<std::string>();
         if (jc.contains("method")) p.method = jc["method"].get<std::string>();
         if (jc.contains("output_mode")) p.output_mode = jc["output_mode"].get<std::string>();
+        if (jc.contains("scene_format")) p.scene_format = jc["scene_format"].get<std::string>();
+        if (jc.contains("mosaic_cog")) p.mosaic_cog = jc["mosaic_cog"].get<bool>();
+        if (jc.contains("profile_mode")) p.profile_mode = jc["profile_mode"].get<std::string>();
         if (jc.contains("ref_image")) p.ref_image = jc["ref_image"].get<std::string>();
+        readNumList(jc, "target_mean", p.target_mean);
+        readNumList(jc, "target_std", p.target_std);
         if (jc.contains("seam_check_threshold"))
             p.seam_check_threshold = jc["seam_check_threshold"].get<double>();
+        if (jc.contains("min_overlap_px")) p.min_overlap_px = jc["min_overlap_px"].get<int>();
+        if (jc.contains("overlap_max_side"))
+            p.overlap_max_side = jc["overlap_max_side"].get<int>();
+        if (jc.contains("apply_chunk")) p.apply_chunk = jc["apply_chunk"].get<int>();
         if (jc.contains("block_size")) p.block_size = jc["block_size"].get<int>();
+        if (jc.contains("wallis_target_std"))
+            p.wallis_target_std = jc["wallis_target_std"].get<double>();
+        if (jc.contains("use_gpu")) p.use_gpu = jc["use_gpu"].get<bool>();
         if (jc.contains("min_mem_gb")) p.min_mem_gb = jc["min_mem_gb"].get<double>();
         if (jc.contains("profile_path")) p.profile_path = jc["profile_path"].get<std::string>();
         if (jc.contains("write_profile")) p.write_profile = jc["write_profile"].get<bool>();
@@ -147,10 +172,17 @@ int main(int argc, char** argv) {
             p.nodata_pct_threshold = jt["nodata_pct_threshold"].get<int>();
         if (jt.contains("skip_empty_tiles")) p.skip_empty_tiles = jt["skip_empty_tiles"].get<bool>();
         if (jt.contains("num_threads")) p.num_threads = jt["num_threads"].get<int>();
+        if (jt.contains("num_processes")) p.num_processes = jt["num_processes"].get<int>();
+        if (jt.contains("cache_mb")) p.cache_mb = jt["cache_mb"].get<double>();
+        if (jt.contains("tile_buffer")) p.tile_buffer = jt["tile_buffer"].get<int>();
         if (jt.contains("build_overviews")) p.build_overviews = jt["build_overviews"].get<std::string>();
+        if (jt.contains("overview_policy")) p.build_overviews = jt["overview_policy"].get<std::string>();
         if (jt.contains("bbox")) p.bbox = jt["bbox"].get<std::string>();
+        if (jt.contains("tiles_scope")) p.tiles_scope = jt["tiles_scope"].get<std::string>();
         if (jt.contains("resume")) p.resume = jt["resume"].get<bool>();
         if (jt.contains("overwrite")) p.overwrite = jt["overwrite"].get<bool>();
+        if (jt.contains("keep_tmp_vrt")) p.keep_tmp_vrt = jt["keep_tmp_vrt"].get<bool>();
+        if (jt.contains("use_gpu")) p.use_gpu = jt["use_gpu"].get<bool>();
         if (jt.contains("min_mem_gb")) p.min_mem_gb = jt["min_mem_gb"].get<double>();
 
         iptl::ITiling* tl = createTiling();

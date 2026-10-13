@@ -63,7 +63,13 @@ GDAL_SHARE="$VCPKG/installed/x64-linux/share"
 [ -d "$GDAL_SHARE/gdal" ] && cp -r "$GDAL_SHARE/gdal" "$STAGE/share/gdal" && echo "  + share/gdal"
 [ -d "$GDAL_SHARE/proj" ] && cp -r "$GDAL_SHARE/proj" "$STAGE/share/proj" && echo "  + share/proj"
 
-# TODO(tiling operator): 届时把项目 data/tms_CGCS2000.json 拷入 $STAGE/share/gdal/
+# CGCS2000 TMS 定义（自研引擎内置该方案；此处供随包 GDAL CLI / 外部工具使用）
+TMS_JSON="$ROOT/operators/tiling/data/tms_CGCS2000.json"
+if [ -f "$TMS_JSON" ]; then
+    mkdir -p "$STAGE/share/gdal"
+    cp -f "$TMS_JSON" "$STAGE/share/gdal/tms_CGCS2000.json"
+    echo "  + share/gdal/tms_CGCS2000.json"
+fi
 
 # ---------- 5. 启动环境脚本 ----------
 cat > "$STAGE/bin/ipenv.sh" <<'EOF'

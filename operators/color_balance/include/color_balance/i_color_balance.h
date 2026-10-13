@@ -28,8 +28,18 @@ struct ColorBalanceParams {
     // hist_match：直方图匹配（回退，全局参考，有接缝风险）
     // global_adjust：全局统计目标（仅完全无重叠时回退）
     std::string ref_image;              // 空 = 排序后第一景
-    std::string output_mode = "tif";    // tif：每景 GeoTIFF | vrt：匀色 VRT+镶嵌 VRT（零像素落盘；wallis 景仍物理输出）
-    std::string profile_mode = "create"; // create（新建方案）| append（新影像按既有方案对齐：方案内景参数冻结，新景由重叠区解参并追加）
+    // 目标统计（方案 §5.1）：直接指定目标 μ/σ，优先级高于 ref_image。
+    // 空 = 未指定（用参考景统计）；1 个值 = 三波段统一；3 个值 = 逐波段。
+    // 生效范围：global_adjust、block_wallis（Wallis 目标）；hist_match 用参考直方图，忽略此项（告警）。
+    std::vector<double> target_mean;
+    std::vector<double> target_std;
+    // 输出形态（方案 §5.1）：vrt（默认，每景匀色 VRT + 镶嵌 VRT，零像素落盘）
+    //   | cog_mosaic（= vrt + 额外物理镶嵌 COG）| per_scene_cog（= 每景 COG 布局）
+    //   | tif（每景 GeoTIFF，兼容旧值）
+    std::string output_mode = "vrt";
+    // 方案模式（方案 §5.1）：create（新建）/ append（新影像按既有方案对齐并追加）/
+    //   apply（仅按既有方案处理给定影像，参数冻结，不改方案）/ recreate（全局重算，等价 create 全量）
+    std::string profile_mode = "create";
     std::string scene_format = "gtiff"; // 物理每景输出布局：gtiff（DEFLATE tiled）| cog（COG 布局，方案 §4.2 per_scene_cog）
     bool mosaic_cog = false;            // vrt 模式下额外输出物理镶嵌 COG（方案 §4.2 balance_and_mosaic）
     double seam_check_threshold = 2.0;  // 重叠对 |Δμ|（波段最大值）低于此值 → 跳过调节

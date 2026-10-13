@@ -92,17 +92,47 @@ public:
                   "block_wallis / hist_match / global_adjust";
             return false;
         }
-        if (params_.output_mode != "tif" && params_.output_mode != "vrt") {
-            err = "output_mode 仅支持 tif / vrt";
+        // output_mode 规格值归一化（方案 §5.1：vrt | cog_mosaic | per_scene_cog；兼容旧值 tif）
+        if (params_.output_mode == "vrt") {
+            // 每景匀色 VRT + 镶嵌 VRT（零像素落盘）
+        } else if (params_.output_mode == "tif") {
+            // 兼容旧值：每景 GeoTIFF
+        } else if (params_.output_mode == "cog_mosaic") {
+            params_.output_mode = "vrt";
+            params_.mosaic_cog = true;
+        } else if (params_.output_mode == "per_scene_cog") {
+            params_.output_mode = "tif";
+            params_.scene_format = "cog";
+        } else {
+            err = "output_mode 仅支持 vrt / cog_mosaic / per_scene_cog（兼容 tif）";
             return false;
         }
         if (params_.scene_format != "gtiff" && params_.scene_format != "cog") {
             err = "scene_format 仅支持 gtiff / cog";
             return false;
         }
-        if (params_.method != "block_wallis" &&
-            params_.method != "overlap_adjust+wallis" && params_.mosaic_cog) {
+        if (params_.profile_mode != "create" && params_.profile_mode != "append" &&
+            params_.profile_mode != "apply" && params_.profile_mode != "recreate") {
+            err = "profile_mode 仅支持 create / append / apply / recreate";
+            return false;
+        }
+        // 目标统计取值校验：空 | 1 值（三波段统一）| 3 值（逐波段）；std 必须 > 0
+        if ((!params_.target_mean.empty() && params_.target_mean.size() != 1 &&
+             params_.target_mean.size() != 3) ||
+            (!params_.target_std.empty() && params_.target_std.size() != 1 &&
+             params_.target_std.size() != 3)) {
+            err = "target_mean / target_std 需为空、1 个值（统一）或 3 个值（逐波段）";
+            return false;
+        }
+        for (double s : params_.target_std) {
+            if (s <= 0) {
+                err = "target_std 必须 > 0";
+                return false;
+            }
+        }
+        if (params_.mosaic_cog && params_.output_mode != "vrt") {
             ip::logWarn("mosaic_cog 仅在 vrt 输出模式下有效（已忽略）");
+            params_.mosaic_cog = false;
         }
         if (params_.block_size < 64) {
             err = "block_size 最小 64";
@@ -136,6 +166,19 @@ private:
         if (cb) cb(pct, msg);
     }
 
+    // 目标统计解析（方案 §5.1）：显式 target_mean/target_std 优先（1 值统一 / 3 值逐波段），
+    // 否则用参考景统计。生效于 global_adjust / block_wallis。
+    void resolveTarget(const Scene& ref, double tMean[3], double tStd[3]) const {
+        for (int b = 0; b < 3; ++b) {
+            const size_t ti = params_.target_mean.size() == 1 ? 0 : static_cast<size_t>(b);
+            const size_t si = params_.target_std.size() == 1 ? 0 : static_cast<size_t>(b);
+            tMean[b] = params_.target_mean.empty() ? ref.stats.mean[b]
+                                                 : params_.target_mean[ti];
+            tStd[b] = params_.target_std.empty() ? ref.stats.std[b]
+                                                : params_.target_std[si];
+        }
+    }
+
     bool run(const ProgressCallback& cb, std::string& err) {
         // 运行日志落盘（每次处理一个文件，避免持续开发无日志）
         {
@@ -153,10 +196,18 @@ private:
         }
         ip::MemGuard::checkOrThrow(params_.min_mem_gb, "开始");
         if (params_.use_gpu) {
-            ip::logWarn("use_gpu=true 但本期为纯 CPU 实现（接口占位），按 CPU 执行");
+#if defined(IP_ENABLE_GPU)
+            ip::logWarn("use_gpu=true 且已启用 IP_ENABLE_GPU，但 GPU 路径尚未实现，按 CPU 执行");
+#else
+            ip::logWarn("use_gpu=true 但未以 IP_ENABLE_GPU 编译（本期纯 CPU），按 CPU 执行");
+#endif
         }
-        // 方案追加模式：既有景参数冻结，新景由重叠区解参并追加（方案 §4.4 场景 1）
+        // 方案模式分派（方案 §5.1）
         if (params_.profile_mode == "append") return runAppend(cb, err);
+        if (params_.profile_mode == "apply") return runApply(cb, err);
+        if (params_.profile_mode == "recreate") {
+            ip::logInfo("recreate：全局重算（新旧全体重统计、重解参数——等价 create 全量）");
+        }
 
         // 1. 收集输入
         std::vector<std::string> files;
@@ -278,6 +329,10 @@ private:
                                params_.method == "overlap_adjust+wallis";
         const bool useHist = params_.method == "hist_match";
         const bool vrtMode = params_.output_mode == "vrt";
+        if (params_.mosaic_cog && vrtMode && (useWallis || useHist)) {
+            ip::logWarn("mosaic_cog 对 wallis/hist_match 物理输出不适用（已忽略）");
+            params_.mosaic_cog = false;
+        }
         uint64_t refHist[3][256];
         bool refHistReady = false;
         std::vector<std::string> outPaths;
@@ -291,16 +346,14 @@ private:
             if (useWallis) {
                 report(cb, pct, "应用 Wallis " + S.id);
                 outPath = (fs::path(params_.output_dir) / (stem + ".tif")).string();
-                // 目标 μ=参考景；σ=wallis_target_std（>0 显式值）否则参考景 std
-                double tStd[3];
+                // 目标 μ/σ：显式 target_mean/std > （wallis_target_std>0）> 参考景统计
+                double tMean[3], tStd[3];
+                resolveTarget(scenes_[refIdx], tMean, tStd);
                 for (int b = 0; b < 3; ++b) {
-                    tStd[b] = params_.wallis_target_std > 0
-                                  ? params_.wallis_target_std
-                                  : scenes_[refIdx].stats.std[b];
+                    if (params_.wallis_target_std > 0) tStd[b] = params_.wallis_target_std;
                 }
                 const WallisGrid wg = computeWallisGrid(
-                    S.ds.get(), scenes_[refIdx].stats.mean, tStd,
-                    params_.block_size, S.gain, S.offset);
+                    S.ds.get(), tMean, tStd, params_.block_size, S.gain, S.offset);
                 if (!applyWallisToFile(S.ds.get(), outPath, wg,
                                        params_.apply_chunk, err,
                                        params_.scene_format.c_str())) {
@@ -308,6 +361,10 @@ private:
                 }
             } else if (useHist) {
                 report(cb, pct, "应用直方图匹配 " + S.id);
+                if (!params_.target_mean.empty() || !params_.target_std.empty()) {
+                    ip::logWarn("hist_match 使用参考影像直方图，target_mean/target_std "
+                                "不生效（已忽略）");
+                }
                 outPath = (fs::path(params_.output_dir) / (stem + ".tif")).string();
                 if (!refHistReady) {
                     exactHistograms(scenes_[refIdx].ds.get(), refHist);
@@ -468,18 +525,26 @@ private:
         ip::logInfo("参考景: " + ref.id);
 
         if (params_.method == "global_adjust") {
+            double tMean[3], tStd[3];
+            resolveTarget(ref, tMean, tStd);
+            const bool explicitTarget =
+                !params_.target_mean.empty() || !params_.target_std.empty();
+            if (explicitTarget) {
+                ip::logInfo("global_adjust 使用显式目标统计 μ=" + fmt3(tMean) +
+                            " σ=" + fmt3(tStd));
+            }
             for (size_t i = 0; i < scenes_.size(); ++i) {
                 if (static_cast<int>(i) == refIdx) continue;
                 Scene& S = scenes_[i];
                 for (int b = 0; b < 3; ++b) {
-                    const double g =
-                        ref.stats.std[b] / std::max(S.stats.std[b], 1e-3);
+                    const double g = tStd[b] / std::max(S.stats.std[b], 1e-3);
                     S.gain[b] = std::min(std::max(g, 0.2), 5.0);
-                    S.offset[b] = ref.stats.mean[b] - S.gain[b] * S.stats.mean[b];
+                    S.offset[b] = tMean[b] - S.gain[b] * S.stats.mean[b];
                 }
                 S.paramsSet = true;
                 S.adjusted = true;
-                S.note = "global_adjust（对齐参考景全局统计）";
+                S.note = explicitTarget ? "global_adjust（对齐指定目标统计）"
+                                        : "global_adjust（对齐参考景全局统计）";
                 ip::logWarn("  " + S.id + " " + S.note +
                             " gain=" + fmt3(S.gain));
             }
@@ -949,6 +1014,105 @@ private:
             ip::logInfo("  " + S.id + ": " + S.note +
                         (S.adjusted ? "（gain=" + fmt3(S.gain) + "）" : ""));
         }
+        return true;
+    }
+
+    // ============ apply 模式（方案 §5.1：仅按既有方案处理给定影像）============
+    // inputs=待处理影像（须已在方案中，按 id 匹配）；profile_path=既有方案。
+    // 参数完全冻结：不重解、不改方案文件；输出按 output_mode（vrt→匀色 VRT | tif/cog→物理）。
+    // 注：apply 为"逐景一致应用"，不重生成镶嵌 VRT（需全量拼装时用 create/append）。
+    bool runApply(const ProgressCallback& cb, std::string& err) {
+        ip::Json prof;
+        if (!ip::readJsonFile(params_.profile_path, prof, err)) {
+            err = "读取既有方案失败: " + err;
+            return false;
+        }
+        ip::logInfo("apply 模式：既有方案 " + params_.profile_path +
+                    "（参数冻结，方案不改）");
+        if (params_.mosaic_cog) {
+            ip::logWarn("apply 为逐景应用，不重生成镶嵌 VRT/COG（mosaic_cog 已忽略）；"
+                        "需全量拼装请用 create/append");
+        }
+
+        // 方案内 id → 冻结 gain/offset
+        std::map<std::string, std::array<double, 3>> gmap, omap;
+        for (const auto& ji : prof["images"]) {
+            const std::string id = ji["id"].get<std::string>();
+            std::array<double, 3> g{}, o{};
+            for (int b = 0; b < 3; ++b) {
+                g[b] = ji["transform"]["gain"][b].get<double>();
+                o[b] = ji["transform"]["offset"][b].get<double>();
+            }
+            gmap[id] = g;
+            omap[id] = o;
+        }
+        if (gmap.empty()) {
+            err = "方案内无影像记录";
+            return false;
+        }
+
+        std::vector<std::string> files;
+        std::string cerr_;
+        for (const auto& in : params_.inputs) {
+            collectInputFiles(in, files, cerr_);
+            if (!cerr_.empty()) {
+                err = cerr_;
+                return false;
+            }
+        }
+        std::sort(files.begin(), files.end());
+        files.erase(std::unique(files.begin(), files.end()), files.end());
+        if (files.empty()) {
+            err = "未找到待处理影像";
+            return false;
+        }
+
+        fs::create_directories(params_.output_dir);
+        const bool vrtMode = params_.output_mode == "vrt";
+        int done = 0;
+        for (const auto& f : files) {
+            ip::MemGuard::checkOrThrow(params_.min_mem_gb, "apply 前");
+            const std::string id = fs::path(f).stem().string();
+            auto git = gmap.find(id);
+            if (git == gmap.end()) {
+                err = "影像不在方案中（apply 要求影像已在方案内；新影像请用 "
+                      "profile_mode=append）: " + f;
+                return false;
+            }
+            auto ds = ip::openReadOnly(f);
+            if (!ds) {
+                err = "无法打开影像: " + f + "（" + CPLGetLastErrorMsg() + "）";
+                return false;
+            }
+            const int pct = 10 + static_cast<int>(85.0 * (++done) / files.size());
+            double g[3], o[3];
+            for (int b = 0; b < 3; ++b) {
+                g[b] = git->second[b];
+                o[b] = omap[id][b];
+            }
+            const std::string stem = id + "_balanced";
+            if (vrtMode) {
+                report(cb, pct, "按方案生成匀色 VRT " + id);
+                const std::string vp =
+                    (fs::path(params_.output_dir) / (stem + ".vrt")).string();
+                if (!writeBalancedVrt(ds.get(), vp, g, o, err)) return false;
+                if (!verifyBalancedVrt(ds.get(), vp, g, o, err)) return false;
+                ip::logInfo("  " + id + " → " + vp + "（gain=" + fmt3(g) + "）");
+            } else {
+                report(cb, pct, "按方案应用参数 " + id);
+                const std::string op =
+                    (fs::path(params_.output_dir) / (stem + ".tif")).string();
+                if (!applyGainOffsetToFile(ds.get(), op, g, o, params_.apply_chunk,
+                                           err, params_.scene_format.c_str())) {
+                    return false;
+                }
+                ip::logInfo("  " + id + " → " + op + "（gain=" + fmt3(g) + "）");
+            }
+        }
+        report(cb, 100, "apply 完成");
+        ip::logInfo("==== apply 摘要 ====");
+        ip::logInfo("  按方案处理 " + std::to_string(files.size()) +
+                    " 景（参数冻结，方案未修改）");
         return true;
     }
 
