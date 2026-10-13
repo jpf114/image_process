@@ -169,6 +169,9 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 10. **Phase 2 验证锚点（2026-10-13）**：CGCS2000 z10~z14 候选瓦片 502 张与 gdal raster tile 逐级一致（2/8/28/96/368）；z14 全瓦片公共有效区 RGB diff 3.54（bilinear vs CLI near）；GF2 边缘瓦片 alpha 25% + 有效区 RGB [25,27,23] 与 Phase 0 C 方案一致；skip-empty 15898 张正确跳过。性能：2024 mosaic z10-14 PNG 502 张 9s（4 线程）；GF2 无 overview 源 z17-18 需建 .ovr 提速（方案 4.3 已定，tiling 已实现 build_overviews=auto）。
 11. **瓦片"写出/续跑"计数必须用独立返回码**：断点续跑跳过若返回 0（与"写出"同码），会被同时计入 written → 统计重复（实测 4+4+12 = 20 > 候选 16，且掩盖续跑是否真的生效）。定稿 `renderTile` 返回 **4 = 续跑跳过**（0=写出/1=空/2=阈值/3=数据外）；gtest `RenderTile.ResumeSkipsExisting` 锁定。复核验证：第二次运行「写出 0，续跑跳过 4，数据外 12」。
 12. **依赖最小化：OpenCV 不引入**（2026-10-13 完整评估）：本项目计算负载为 ①`++hist[v]` 直方图统计 ②`clip(g·x+o)`/`lut[x]` 逐像素映射 ③重采样/编码（全交 GDAL）④小规模稠密 LS（自研高斯消元，N=景数）。OpenCV 三大优势——优化 imgproc 滤波、稠密线代、CUDA——分别对应本项目未实现的融合羽化、过小的解算规模、无 GPU 环境；唯一理论受益点 `cv::LUT` 处非瓶颈（带宽型，-O3 已饱和）。且实测 `--as-needed` 已将其从二进制剔除（`DT_NEEDED` 无 opencv），故仅为声明冗余。定稿：`vcpkg.json` 与 CMake 均移除；再引入条件见《技术方案》§3.6。
+13. **外部环境注入 GDAL/PROJ 数据路径会打断坐标解析（实测）**：在 conda 环境（geo_env）内启动服务时，激活脚本设置 `PROJ_DATA`/`GDAL_DATA`/`GDAL_DRIVER_PATH` 指向该环境的另一套 PROJ 数据库（`LAYOUT.VERSION.MINOR=2`，与 vcpkg GDAL 3.12 不兼容）→ 切换到非 geo_env 环境或显式钉住 vcpkg 路径（`ipenv.sh`/容器 ENV/`worker_env()`）即可；若为 conda 之外的进程，须清除它设置的 `GDAL_DRIVER_PATH`。
+14. **无 overview 金字塔时切片慢 ≈213×（实测）**：同一高层级切片规模，无金字塔的镶嵌 VRT 单任务 464 瓦片耗时 **4089s（≈8.8s/瓦片）**；带 `.ovr` 时为 492 瓦片 **20.3s（≈0.041s/瓦片）**。切片任务保持 `overview_policy=auto`（默认即自建 .ovr），勿在无金字塔的 VRT 上做大规模切片。
+15. **并发与超订的定量结论（压测实测）**：匀色阶段逐景串行 → worker 并发近线性提速（1→2 worker 1.89×）；切片阶段已用满核 → worker 并发无收益且单任务线性变慢（总量守恒）；`workers × num_threads ≈ 物理核数` 时吞吐不劣于超订（实测差 0.05%）。
 
 ## 9. 迭代 2 与 Phase 2 验证结果（2026-10-13）
 
@@ -191,6 +194,7 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **workflow 参数与交付** | workflow 现解析 profile_mode/scene_format/mosaic_cog/target/wallis_target_std/cache_mb/tile_buffer/num_processes/use_gpu/keep_tmp_vrt/tiles_scope/overview_policy；`cmake --install` 现含 tiling/workflow/libip_tiling.so + share/gdal/tms_CGCS2000.json |
 | **S3 服务化（Phase 4）** | 端到端：POST 提交 → 进度 10→85→100 → done → 经 `GET /tiles/...` 取瓦片（HTTP 200/30837B）；并发：workers=1 时 A=running / B=queued；**崩溃隔离**：kill -9 worker → 任务 failed(137)、服务 health 200、队列自动续跑下一任务；取消：DELETE running → canceled；优雅退出：SIGTERM → "开始优雅退出"；重启恢复：运行中任务重启后标 `failed/服务重启中断`（可重提交），历史任务从磁盘恢复 |
 | **S3 容器化** | 镜像 268MB（ubuntu:24.04 + dist 包 + tini + tzdata）；容器内提交→done(9.5s，1 瓦片)→宿主卷可见→`GET /tiles/…` 200/30837B；`docker stop` 由 tini 转发 SIGTERM 触发优雅退出。**实测约束**：基础镜像须不旧于构建机 glibc（debian:12 报 `GLIBC_2.38 not found`）；TZ 需 tzdata |
+| **S3 压测（4.5）** | 7 场景/13 任务全 done：[Phase4压测报告.md](文档资料/关于栅格切片和匀色/Phase4压测报告.md)。匀色为主的任务 worker 1→2 **1.89×**（118.2→62.6s）；切片密集任务 worker 并发**无收益**（41.87→42.55s，单任务 20.3→42.2s）；超订(2×nt4) vs 匹配(2×nt2) **差 0.05%**→ 规则 `workers × num_threads ≈ 核数`；峰值 RSS 匀色 680MB / GF2 全图 932MB / tiling-only 52–61MB（块式恒定内存验证）；297 次 health 采样 **0 失败**、p95 0.4–8.4ms；7 次优雅退出 exit=0 |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 
