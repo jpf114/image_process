@@ -3,6 +3,9 @@ build/
 bin/
 dist/
 output/
+vcpkg_installed/
+compile_commands.json
+CMakeUserPresets.json
 *.o
 *.so
 *.so.*
@@ -13,6 +16,10 @@ output/
 .idea/
 .DS_Store
 .cache/
+
+# 运行日志 / Windows 下载区标记（WSL 常见 ADS 残留）
+*.log
+*:Zone.Identifier
 
 # GDAL 辅助
 *.aux.xml
