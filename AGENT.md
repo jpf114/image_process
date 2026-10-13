@@ -100,12 +100,13 @@ image_process/
 ## 7. 常用命令
 
 ```bash
-# 构建（vcpkg 全局 classic 安装，manifest 已禁用；bin 输出到 bin/Release）
-cmake -S . -B build/release -DCMAKE_TOOLCHAIN_FILE=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build/release -j4
-# debug 同理：build/debug + CMAKE_BUILD_TYPE=Debug → bin/Debug
+# 构建（CMakePresets，参照 cog-cpp；linux=Release→build/release，linux-debug=Debug→build/debug）
+export VCPKG_ROOT=$HOME/vcpkg
+cmake --preset linux && cmake --build --preset linux -j4
+# debug: cmake --preset linux-debug && cmake --build --preset linux-debug -j4
+# 输出 bin/{Release,Debug}；manifest 已禁用（vcpkg.json 仅清单说明）
 
-# 打包（自动构建 Release + 收集依赖 + tar.gz，产物 dist/image_process.tar.gz）
+# 打包（自动用 presets 构建 Release + 收集依赖 + tar.gz）
 scripts/package_release.sh
 
 # 运行（LD_LIBRARY_PATH/GDAL_DATA/PROJ_DATA 指向 vcpkg 安装）
@@ -113,6 +114,12 @@ export LD_LIBRARY_PATH=$HOME/vcpkg/installed/x64-linux/lib:$LD_LIBRARY_PATH
 export GDAL_DATA=$HOME/vcpkg/installed/x64-linux/share/gdal
 export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
+bin/Release/workflow --config <workflow.json> [--only color|tiling]
+
+# 运行日志：自动落盘 <output_dir>/logs/run_<operator>_<时间戳>.log（每次处理一个文件）
+
+# git（origin=github.com/jpf114/image_process，本地开发按阶段提交，推送需用户确认）
+git add -A && git commit -m "..."
 
 # 运行 Python 验证/对比脚本
 conda activate geo_env && python scripts/phase0/<脚本>.py
