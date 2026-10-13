@@ -16,7 +16,7 @@
 - **Phase 0（Python 验证）6/6 PASS**；**Phase 1（core+color_balance）→ Phase 2（tiling）→ Phase 3（apps+workflow）全部完成并数据级验证**；S1 差距补齐、S2 单元测试（gtest）完成。
 - **本轮（2026-10-13）独立完整复核并逐项修复**：交付包漏 workflow、workflow 未接 profile_mode/输出/目标等参数、profile_mode 无校验且 apply/recreate 缺失、target_mean/std 缺失、参数命名偏离方案、断点续跑计数重复、OpenCV 冗余依赖——详见 §6 计划表末行、§8 教训 11/12、§9 验证表。
 - 当前测试用例 **24/24 通过**（`cd build/release && ctest --output-on-failure`）。
-- **S3 Phase 4 服务化已完成（2026-10-13）**：`ip_server`（cpp-httplib 控制面 + 任务队列/状态机 + worker 进程池 fork/exec）+ REST 5 端点 + 静态瓦片 + Dockerfile；已验证提交/进度/取消/崩溃隔离/优雅退出/重启恢复。用法见 [服务化使用说明.md](文档资料/关于栅格切片和匀色/服务化使用说明.md)，设计论证见 [Phase4服务化论证报告.md](文档资料/关于栅格切片和匀色/Phase4服务化论证报告.md)。
+- **S3 Phase 4 服务化已完成（2026-10-13）**：`ip_server`（cpp-httplib 控制面 + 任务队列/状态机 + worker 进程池 fork/exec）+ REST 5 端点 + 静态瓦片 + Dockerfile（镜像已构建并容器内端到端实测）。用法见 [服务化使用说明.md](文档资料/关于栅格切片和匀色/服务化使用说明.md)，设计论证见 [Phase4服务化论证报告.md](文档资料/关于栅格切片和匀色/Phase4服务化论证报告.md)。
 - 待办：S4 MBTiles/GPKG（可选）；`num_processes` 真多进程（服务化已提供任务级并行的替代路径）。
 - 测试数据：`文档资料/关于栅格切片和匀色/data/{2024,2025}`（2024 四景 2m EPSG:4490 标准图幅；2025 GF2 0.8m 极暗、33% 无效区）
 
@@ -190,6 +190,7 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **target_mean/std** | global_adjust 显式目标 μ=100/110/90、σ=40/35/30：3 景 gain 与 σ_t/σ 逐波段一致（误差 <1e-6，参考景按设计恒等）；workflow JSON 数字/数组两种写法均解析通过 |
 | **workflow 参数与交付** | workflow 现解析 profile_mode/scene_format/mosaic_cog/target/wallis_target_std/cache_mb/tile_buffer/num_processes/use_gpu/keep_tmp_vrt/tiles_scope/overview_policy；`cmake --install` 现含 tiling/workflow/libip_tiling.so + share/gdal/tms_CGCS2000.json |
 | **S3 服务化（Phase 4）** | 端到端：POST 提交 → 进度 10→85→100 → done → 经 `GET /tiles/...` 取瓦片（HTTP 200/30837B）；并发：workers=1 时 A=running / B=queued；**崩溃隔离**：kill -9 worker → 任务 failed(137)、服务 health 200、队列自动续跑下一任务；取消：DELETE running → canceled；优雅退出：SIGTERM → "开始优雅退出"；重启恢复：运行中任务重启后标 `failed/服务重启中断`（可重提交），历史任务从磁盘恢复 |
+| **S3 容器化** | 镜像 268MB（ubuntu:24.04 + dist 包 + tini + tzdata）；容器内提交→done(9.5s，1 瓦片)→宿主卷可见→`GET /tiles/…` 200/30837B；`docker stop` 由 tini 转发 SIGTERM 触发优雅退出。**实测约束**：基础镜像须不旧于构建机 glibc（debian:12 报 `GLIBC_2.38 not found`）；TZ 需 tzdata |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 

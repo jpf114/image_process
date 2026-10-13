@@ -14,11 +14,17 @@
 #  - 显式线程数（GDAL_NUM_THREADS）——容器内 CPU 探测受 cgroup 配额影响会高估
 #  - tini 作 PID 1 → SIGTERM 正确转发，ip_server 优雅退出并回收 worker
 #  - 数据/瓦片走卷（避免写入容器可写层）
-FROM debian:12-slim
+# 基础镜像：**必须不旧于构建机**（package_release.sh 的前置假设）——本项目在 Ubuntu 24.04
+# (glibc 2.39) 上构建，二进制依赖 GLIBC_2.38 / GLIBCXX_3.4.32，故默认用 ubuntu:24.04；
+# debian:12(bookworm, glibc 2.36) 会报 "version `GLIBC_2.38' not found"。
+# 可用 --build-arg BASE=<tag> 覆盖（如无 docker.io 访问时用本地已有 tag）。
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
 
-# 运行时最小依赖：libstdc++（GDAL/自研 exe 需要）+ tini（信号转发）
+# 运行时最小依赖：libstdc++（GDAL/自研 exe 需要）+ tini（信号转发）+ tzdata（TZ=Asia/Shanghai 生效）
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libstdc++6 tini \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libstdc++6 tini tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 # 交付包（含全部非系统 so + GDAL/PROJ 数据 + bin/ipenv.sh）
