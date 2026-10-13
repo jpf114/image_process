@@ -11,10 +11,12 @@
 - `core/`：公共基础（GDAL 封装、线程池、参数、TMS 计算）
 - 后期：cpp-httplib + 多进程 worker 服务化（不用 Go；纯 CPU C++ 对 Docker 友好）
 
-## 2. 当前状态（2026-10-12）
+## 2. 当前状态（2026-10-13）
 
-- **Phase 0（Python 验证）已完成，6/6 PASS**：结论见 [Phase0验证报告.md](文档资料/关于栅格切片和匀色/Phase0验证报告.md)，方案见 [技术方案.md](文档资料/关于栅格切片和匀色/技术方案.md)
-- Phase 1（C++：core + color_balance）进行中
+- **Phase 0（Python 验证）6/6 PASS**；**Phase 1（core+color_balance）→ Phase 2（tiling）→ Phase 3（apps+workflow）全部完成并数据级验证**；S1 差距补齐、S2 单元测试（gtest）完成。
+- **本轮（2026-10-13）独立完整复核并逐项修复**：交付包漏 workflow、workflow 未接 profile_mode/输出/目标等参数、profile_mode 无校验且 apply/recreate 缺失、target_mean/std 缺失、参数命名偏离方案、断点续跑计数重复、OpenCV 冗余依赖——详见 §6 计划表末行、§8 教训 11/12、§9 验证表。
+- 当前测试用例 **24/24 通过**（`cd build/release && ctest --output-on-failure`）。
+- 待办：S3 Phase 4 服务化（《后续执行方案》§二）、S4 MBTiles/GPKG。
 - 测试数据：`文档资料/关于栅格切片和匀色/data/{2024,2025}`（2024 四景 2m EPSG:4490 标准图幅；2025 GF2 0.8m 极暗、33% 无效区）
 
 ## 3. 硬性规范（违反即返工）
@@ -44,11 +46,13 @@
 - 线程默认 = 物理核数（>核数无收益，实测 4 核饱和）
 
 ### 3.5 构建与环境（2026-10-12 需求方确认）
-- C++17；**vcpkg 使用全局 classic 安装**（`/home/tdt-dell/vcpkg`，x64-linux 已装 gdal 3.12.4 + opencv4 4.12.0 + nlohmann-json + proj，无需更新）。**禁用 manifest 模式**（CMakeLists 已默认 OFF）；根目录 `vcpkg.json` 仅作依赖清单/版本说明，不触发任何下载安装
+- C++17；**vcpkg 使用全局 classic 安装**（`/home/tdt-dell/vcpkg`，x64-linux 已装 gdal 3.12.4 + nlohmann-json + proj，无需更新；OpenCV 虽在 vcpkg 中存在但本项目不再依赖）。**禁用 manifest 模式**（CMakeLists 已默认 OFF）；根目录 `vcpkg.json` 仅作依赖清单/版本说明，不触发任何下载安装
 - 构建目录区分 **build/debug 与 build/release**；二进制输出 **bin/Debug 与 bin/Release**（顶层 CMakeLists 已配置 `$<CONFIG>` 输出）
 - **交付形态默认动态库**：operator 为 .so（如 libip_color_balance.so），core 为内部静态库并入动态库（不单独交付）；后续按需支持静态库
 - **安装默认 Release**：`cmake --install build/release --prefix <dir>`；打包用 `scripts/package_release.sh`——自动构建 Release → install → **递归收集全部动态依赖 so**（排除系统库）→ 拷贝 GDAL_DATA/PROJ 数据 → 生成 bin/ipenv.sh 启动脚本 → tar.gz，可直接带走解压使用（假设目标机 x86_64 且 glibc 不旧于构建机）
 - 所有文本文件 **UTF-8（无 BOM）+ LF**，禁止 CRLF
+- **第三方依赖仅 GDAL + nlohmann-json**（vcpkg.json 同）。**OpenCV 经完整评估不引入**：其优势（imgproc 滤波/稠密线代/CUDA）在本项目未被使用（融合羽化未实现、解算规模过小、无 GPU 环境），唯一理论受益点 `cv::LUT` 处非瓶颈；完整论证与再引入条件见《技术方案》§3.6
+- GPU：`IP_ENABLE_GPU` CMake option（默认 OFF，仅暴露编译宏）+ `use_gpu` 运行参数（占位，GPU 路径未实现）
 - Python 一律用 conda `geo_env`（GDAL 3.11.4 + OpenCV 4.13），禁止 base 环境、禁止先 pip
 - 不私自下载/安装任何库，需先征得用户同意
 
@@ -76,9 +80,9 @@
 image_process/
 ├── AGENT.md            # 本文件
 ├── CMakeLists.txt      # 顶层 C++17 + vcpkg toolchain
-├── vcpkg.json          # 依赖清单
+├── vcpkg.json          # 依赖清单（gdal、nlohmann-json）
 ├── core/               # 公共基础（静态库）
-├── operators/          # 功能动态库：color_balance、tiling
+├── operators/          # 功能动态库：color_balance、tiling（含 data/tms_CGCS2000.json 分发件）
 ├── apps/               # exe 薄壳
 ├── scripts/phase0/     # Python 验证脚本（geo_env）
 ├── output/phase0/      # Phase 0 证据（bench/tms/white_tiles/color）
@@ -97,15 +101,17 @@ image_process/
 | Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | ✅ 完成 |
 | Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | 待启动（设计见《后续执行方案》§二） |
 | S1 差距补齐 | 方案承诺项闭环（每景 COG/镶嵌 COG/append 增量/参数补齐） | ✅ 完成（2026-10-13） |
-| S2 单元测试 | gtest 23 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过 + 真实影像冒烟） |
+| S2 单元测试 | gtest 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过 + 真实影像冒烟） |
+| 复核修复 | 独立完整复核（算法/需求/测试/方案）发现缺陷逐项修复：安装漏件、workflow 参数、profile_mode 校验+apply/recreate、target_mean/std、参数别名、续跑计数、OpenCV 冗余 | ✅ 完成（2026-10-13，24/24 通过 + CLI/workflow 冒烟） |
 
 ## 7. 常用命令
 
 ```bash
-# 构建（CMakePresets，参照 cog-cpp；linux=Release→build/release，linux-debug=Debug→build/debug）
+# 构建（CMakePresets，GCC+Ninja；linux-release→build/release，linux-debug→build/debug）
 export VCPKG_ROOT=$HOME/vcpkg
-cmake --preset linux && cmake --build --preset linux -j4
+cmake --preset linux-release && cmake --build --preset linux-release -j4
 # debug: cmake --preset linux-debug && cmake --build --preset linux-debug -j4
+# GPU 占位开关（默认 OFF，仅暴露 IP_ENABLE_GPU 宏）：cmake --preset linux-release -DIP_ENABLE_GPU=ON
 # 输出 bin/{Release,Debug}；manifest 已禁用（vcpkg.json 仅清单说明）
 
 # 打包（自动用 presets 构建 Release + 收集依赖 + tar.gz）
@@ -116,7 +122,7 @@ export LD_LIBRARY_PATH=$HOME/vcpkg/installed/x64-linux/lib:$LD_LIBRARY_PATH
 export GDAL_DATA=$HOME/vcpkg/installed/x64-linux/share/gdal
 export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
 
-# 单元测试（23 用例；enable_testing 在顶层 CMakeLists，ctest 须在 build/release 下执行）
+# 单元测试（24 用例；enable_testing 在顶层 CMakeLists，ctest 须在 build/release 下执行）
 cd build/release && ctest --output-on-failure
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
 bin/Release/workflow --config <workflow.json> [--only color|tiling]
@@ -151,6 +157,8 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
    - 瓦片渲染：数据交集在瓦片内的**像素偏移**必须计算（交集≠瓦片原点时直读会拉伸错位）；用 `GDALRasterIOExtraArg.eResampleAlg` 在读取时降采样（窗口→瓦片子区 1:1 放置），内存恒定
 9. **多源镶嵌 VRT 的 decim 缺陷（workflow 端到端踩坑）**：自研"SimpleSource 引用匀色 VRT（派生波段）"的镶嵌 VRT 在**降采样读取**时产生横向黑条+内容错位（1:1 读取正常！诊断必须做 decim 场景）；**嵌套派生波段不能用于需要 decim/overview 的下游**。修复：镶嵌 VRT 用 **ComplexSource 引用原始影像 + `<ScaleRatio>/<ScaleOffset>` 内联线性匀色参数**（GDAL 原生支持，结构对齐 gdalbuildvrt：UseMaskBand + SourceProperties + 浮点 rect）；**VrtSource.gain 数组仅 3 波段，band≥3（alpha）循环严禁越界访问**（曾致全瓦片无效）
 10. **Phase 2 验证锚点（2026-10-13）**：CGCS2000 z10~z14 候选瓦片 502 张与 gdal raster tile 逐级一致（2/8/28/96/368）；z14 全瓦片公共有效区 RGB diff 3.54（bilinear vs CLI near）；GF2 边缘瓦片 alpha 25% + 有效区 RGB [25,27,23] 与 Phase 0 C 方案一致；skip-empty 15898 张正确跳过。性能：2024 mosaic z10-14 PNG 502 张 9s（4 线程）；GF2 无 overview 源 z17-18 需建 .ovr 提速（方案 4.3 已定，tiling 已实现 build_overviews=auto）。
+11. **瓦片"写出/续跑"计数必须用独立返回码**：断点续跑跳过若返回 0（与"写出"同码），会被同时计入 written → 统计重复（实测 4+4+12 = 20 > 候选 16，且掩盖续跑是否真的生效）。定稿 `renderTile` 返回 **4 = 续跑跳过**（0=写出/1=空/2=阈值/3=数据外）；gtest `RenderTile.ResumeSkipsExisting` 锁定。复核验证：第二次运行「写出 0，续跑跳过 4，数据外 12」。
+12. **依赖最小化：OpenCV 不引入**（2026-10-13 完整评估）：本项目计算负载为 ①`++hist[v]` 直方图统计 ②`clip(g·x+o)`/`lut[x]` 逐像素映射 ③重采样/编码（全交 GDAL）④小规模稠密 LS（自研高斯消元，N=景数）。OpenCV 三大优势——优化 imgproc 滤波、稠密线代、CUDA——分别对应本项目未实现的融合羽化、过小的解算规模、无 GPU 环境；唯一理论受益点 `cv::LUT` 处非瓶颈（带宽型，-O3 已饱和）。且实测 `--as-needed` 已将其从二进制剔除（`DT_NEEDED` 无 opencv），故仅为声明冗余。定稿：`vcpkg.json` 与 CMake 均移除；再引入条件见《技术方案》§3.6。
 
 ## 9. 迭代 2 与 Phase 2 验证结果（2026-10-13）
 
@@ -159,7 +167,7 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | 最小二乘图平差 | GF2 gain=2.71/2.54/2.74（4 条约束边均衡），各边残差 2.0~7.0（平方和最优，替代单边锚定链式） |
 | block_wallis | 输出 mean=81.4/85.1/67.1 ≈ 参考景统计（按构造正确；target=ref 全局统计语义） |
 | hist_match | 输出 vs 参考 CDF 最大偏差 1.6~2.6%（与 Phase 0 锚点 2.1~2.7% 一致） |
-| VRT 零落盘 | 2024 四景 VRT+mosaic.vrt 共 36KB（对比物理输出 240MB），逐景自检 PASS |
+| VRT 零落盘 | 2024 四景匀色 VRT ×4 ≈10.8KB + mosaic.vrt 9.1KB ≈ **20KB**（对比物理输出 240MB），逐景自检 PASS（早前"36KB"表述有误，已按落盘实测更正） |
 | 组合模式 | overlap_adjust+wallis GF2×2024 全流程通过（5 景块式处理，内存安全） |
 | **tiling 格网** | CGCS2000 z10~14 共 502 瓦片与 gdal raster tile **逐级一致**（2/8/28/96/368） |
 | **tiling 内容** | z14 全瓦片公共有效区 RGB diff=3.54（bilinear vs CLI near，合理）；边缘瓦片 alpha 覆盖两侧一致 |
@@ -167,6 +175,10 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **tiling 性能** | 2024 mosaic z10-14 PNG 502 张 9s（4 线程）；GF2 无 ovr 源 13min（auto overview 已实现，见 workflow） |
 | **workflow 端到端** | 2024 恒等：匀色 VRT 6s → 切片 z12-14 492 张 22s，**零像素落盘**；断点续跑 492 全跳过（2.7s）；vs 纯 tiling z14 diff=2.55（残差=镶嵌源 near decim vs ComplexSource UseMaskBand 的边缘差异，量级合理） |
 | **S2 单元测试** | gtest 23/23 通过（block_stats 5 / tms 6 / solver 7 / render 4）；真实 4490 影像→CGCS2000 z13 冒烟 24 瓦片正常（AutoCreateWarpedVRT 定稿后回归） |
+| **本轮复核修复（24/24）** | 新增 `RenderTile.ResumeSkipsExisting`：续跑返回码 4 与"写出"区分——第二次运行「写出 0，续跑跳过 4，数据外 12」=候选 16，计数守恒 |
+| **apply 模式** | 按既有方案冻结参数生成匀色 VRT（方案 JSON 不被修改，mtime/大小不变）；4 景 gain=1.00 恒等保持；CLI 与 workflow（`profile_mode=apply`）双通道验证通过 |
+| **target_mean/std** | global_adjust 显式目标 μ=100/110/90、σ=40/35/30：3 景 gain 与 σ_t/σ 逐波段一致（误差 <1e-6，参考景按设计恒等）；workflow JSON 数字/数组两种写法均解析通过 |
+| **workflow 参数与交付** | workflow 现解析 profile_mode/scene_format/mosaic_cog/target/wallis_target_std/cache_mb/tile_buffer/num_processes/use_gpu/keep_tmp_vrt/tiles_scope/overview_policy；`cmake --install` 现含 tiling/workflow/libip_tiling.so + share/gdal/tms_CGCS2000.json |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 
