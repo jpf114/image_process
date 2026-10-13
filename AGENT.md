@@ -97,6 +97,7 @@ image_process/
 | Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | ✅ 完成 |
 | Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | 待启动（设计见《后续执行方案》§二） |
 | S1 差距补齐 | 方案承诺项闭环（每景 COG/镶嵌 COG/append 增量/参数补齐） | ✅ 完成（2026-10-13） |
+| S2 单元测试 | gtest 23 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过 + 真实影像冒烟） |
 
 ## 7. 常用命令
 
@@ -114,6 +115,9 @@ scripts/package_release.sh
 export LD_LIBRARY_PATH=$HOME/vcpkg/installed/x64-linux/lib:$LD_LIBRARY_PATH
 export GDAL_DATA=$HOME/vcpkg/installed/x64-linux/share/gdal
 export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
+
+# 单元测试（23 用例；enable_testing 在顶层 CMakeLists，ctest 须在 build/release 下执行）
+cd build/release && ctest --output-on-failure
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
 bin/Release/workflow --config <workflow.json> [--only color|tiling]
 
@@ -139,12 +143,11 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
    - `nBufferRadius` 传 64 但**源缓冲并未扩边**：布局 = 原始请求窗（nXSize×nYSize，行宽 nXSize，无偏移）；radius 仅信息参数（除非 XML 声明 `<BufferRadius>`）。按"行宽含 radius"写会造成堆越界（表现为 close 时 FlushCache 段错误）+ 读回全 0/错位
    - 像素函数为进程内注册，VRT 仅可在同进程打开（切片 operator 同进程使用）；复现证据脚本 `scripts/phase0/test_vrt_min.cpp`
 7. **验证脚本陷阱**：Python 掩码抽样 `arr[b][m][:7]` 只取前 7 个像素毫无代表性——hist_match 首验 CDF 偏差 0.5 的假象即由此来，全量 bincount 后为 0.016~0.026（真值）
-8. **WarpedVRT 编程（tiling 踩坑四次）**：
-   - `GDALCreateWarpedVRT` **不支持空尺寸自动推断**（传 0/nullptr 段错误）——须自行算目标网格（OSR 采样源网格→bbox→尺寸/gt）
-   - `wo->hSrcDS` 必须设置（Validate 检查）；`pTransformerArg`（不是 hTransformArg）；返回值 GDALDatasetH 需 cast
-   - **`GDALSetGenImgProjTransformerDstGeoTransform` 必须调用**：transformer 的 dst 网格默认取 hDstDS（null→单位阵），不设则 warp 全部采样到源外（读出全 0 且无报错）
+8. **WarpedVRT 编程（tiling 踩坑四次，S2 定稿改用 AutoCreateWarpedVRT）**：
+   - **定稿路径：`GDALAutoCreateWarpedVRT(src, srcWkt, dstWkt, eResampleAlg, dfMaxError, nullptr)`**——自动推算目标网格/变换/**DstGeoTransform**，支持指定重采样算法；同 CRS 恒等变换无重采样损失，跨 CRS 由瓦片层 RasterIOExtraArg 兜底。手工 `GDALWarpOptions`+`GDALCreateWarpedVRT` 的下列陷阱仅作历史参考（手写网格：OSR 采样源网格→bbox→尺寸/gt；`wo->hSrcDS` 必设（Validate）；**DstGeoTransform 必须显式设置**否则全 0 无报错；bbox 采样须含边界角点）
+   - **VRT CreateCopy 的 XML 回读校验**：VRT 驱动 CreateCopy 会把序列化 XML 重新 Open 一次——`<SourceDataset>` 取源 dataset description，**MEM 空描述必挂**（`ERROR 4: : No such file or directory` + `Validate(): hSrcDS is not set`，报错点在写出而非 warp）。**VRT 源必须是可重开文件路径**——测试合成源也要先落盘 GTiff 再打开（生产天然满足）
+   - **`threadLocalWarpDs` 语义**：每线程至多缓存一个 VRT，**路径变更即重开**（原实现 thread_local 首次初始化后忽略 path 参数，同线程换路径会错拿旧句柄）
    - **轴序双轨**：warp 内部 SRS 用 `OAMS_AUTHORITY_COMPLIANT`（与 gdal CLI 行为一致）；自研 bbox 数值变换用 TRADITIONAL——两套 SRS 实例分开，混用会全 0 或 bbox 塌缩
-   - bbox 采样网格必须**含边界角点**（中心点采样使范围内缩半格 → 边缘瓦片错位）
    - 瓦片渲染：数据交集在瓦片内的**像素偏移**必须计算（交集≠瓦片原点时直读会拉伸错位）；用 `GDALRasterIOExtraArg.eResampleAlg` 在读取时降采样（窗口→瓦片子区 1:1 放置），内存恒定
 9. **多源镶嵌 VRT 的 decim 缺陷（workflow 端到端踩坑）**：自研"SimpleSource 引用匀色 VRT（派生波段）"的镶嵌 VRT 在**降采样读取**时产生横向黑条+内容错位（1:1 读取正常！诊断必须做 decim 场景）；**嵌套派生波段不能用于需要 decim/overview 的下游**。修复：镶嵌 VRT 用 **ComplexSource 引用原始影像 + `<ScaleRatio>/<ScaleOffset>` 内联线性匀色参数**（GDAL 原生支持，结构对齐 gdalbuildvrt：UseMaskBand + SourceProperties + 浮点 rect）；**VrtSource.gain 数组仅 3 波段，band≥3（alpha）循环严禁越界访问**（曾致全瓦片无效）
 10. **Phase 2 验证锚点（2026-10-13）**：CGCS2000 z10~z14 候选瓦片 502 张与 gdal raster tile 逐级一致（2/8/28/96/368）；z14 全瓦片公共有效区 RGB diff 3.54（bilinear vs CLI near）；GF2 边缘瓦片 alpha 25% + 有效区 RGB [25,27,23] 与 Phase 0 C 方案一致；skip-empty 15898 张正确跳过。性能：2024 mosaic z10-14 PNG 502 张 9s（4 线程）；GF2 无 overview 源 z17-18 需建 .ovr 提速（方案 4.3 已定，tiling 已实现 build_overviews=auto）。
@@ -163,6 +166,7 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **tiling nodata** | GF2 z17-18：skip-empty 正确跳过 15898 张全无效瓦片；边缘瓦片 alpha 25% + 有效区 RGB [25,27,23] 与 Phase 0 透明对策一致 |
 | **tiling 性能** | 2024 mosaic z10-14 PNG 502 张 9s（4 线程）；GF2 无 ovr 源 13min（auto overview 已实现，见 workflow） |
 | **workflow 端到端** | 2024 恒等：匀色 VRT 6s → 切片 z12-14 492 张 22s，**零像素落盘**；断点续跑 492 全跳过（2.7s）；vs 纯 tiling z14 diff=2.55（残差=镶嵌源 near decim vs ComplexSource UseMaskBand 的边缘差异，量级合理） |
+| **S2 单元测试** | gtest 23/23 通过（block_stats 5 / tms 6 / solver 7 / render 4）；真实 4490 影像→CGCS2000 z13 冒烟 24 瓦片正常（AutoCreateWarpedVRT 定稿后回归） |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 

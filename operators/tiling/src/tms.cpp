@@ -79,6 +79,9 @@ bool parseTmsJson(const std::string& jsonPath, TileMatrixSet& tms,
             return false;
         }
         tms.geographic = (tms.epsg == 4326 || tms.epsg == 4490);
+        // topLeftCorner 轴序：EPSG:4326/4490 权威轴序 lat-first（JSON 写 [lat,lon]）；
+        // OGC CRS84 别名 lon-first（写 [lon,lat]）——按 supportedCRS 判定并交换
+        const bool latFirst = crs.find("CRS84") == std::string::npos;
         const auto& mats = j.at("tileMatrix");
         for (const auto& m : mats) {
             TileMatrixLevel lv;
@@ -87,8 +90,8 @@ bool parseTmsJson(const std::string& jsonPath, TileMatrixSet& tms,
             if (tms.geographic) span /= M_PER_DEG;  // → 度
             lv.res = span;
             const auto& tl = m.at("topLeftCorner");
-            lv.topLeftX = tl.at(0).get<double>();
-            lv.topLeftY = tl.at(1).get<double>();
+            lv.topLeftX = latFirst ? tl.at(1).get<double>() : tl.at(0).get<double>();
+            lv.topLeftY = latFirst ? tl.at(0).get<double>() : tl.at(1).get<double>();
             lv.matrixW = m.at("matrixWidth").get<long long>();
             lv.matrixH = m.at("matrixHeight").get<long long>();
             tms.levels.push_back(lv);

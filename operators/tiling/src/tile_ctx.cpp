@@ -14,10 +14,6 @@ namespace fs = std::filesystem;
 
 namespace iptl {
 
-namespace {
-constexpr double M_PER_DEG_TO_DEG = 111319.49079327358;  // 米/度（单位换算）
-}
-
 GDALResampleAlg parseResampleAlg(const std::string& name) {
     if (name == "near" || name == "nearest") return GRA_NearestNeighbour;
     if (name == "bilinear") return GRA_Bilinear;
@@ -31,12 +27,9 @@ bool buildWarpedVrt(GDALDataset* src, const TileMatrixSet& tms,
                     const std::string& resampling, const std::string& vrtPath,
                     double& resX, ip::GeoExtent& extentInTarget,
                     std::string& err) {
-    // 两套 SRS：
-    //  - warp 内部（GenImgProj）用权威轴序（与 gdal raster tile 行为一致）
-    //  - 自研 bbox 计算用 TRADITIONAL（lon-lat 数值语义，Phase 0 教训）
+    // warp 内部（GenImgProj）用权威轴序（与 gdal CLI 行为一致，教训 1h）
     OGRSpatialReference dstSrs = ip::makeSrsFromEpsg(tms.epsg);
     dstSrs.SetAxisMappingStrategy(OAMS_AUTHORITY_COMPLIANT);
-    OGRSpatialReference dstSrsTrad = ip::makeSrsFromEpsg(tms.epsg);  // 默认 TRADITIONAL
     char* dstWkt = nullptr;
     dstSrs.exportToWkt(&dstWkt);
     if (!dstWkt) {
@@ -44,98 +37,23 @@ bool buildWarpedVrt(GDALDataset* src, const TileMatrixSet& tms,
         return false;
     }
 
-    // 完整 Warp 配置：可控重采样算法（AutoCreateWarpedVRT 无法传算法）
     const char* srcWkt = src->GetProjectionRef();
     if (!srcWkt || !srcWkt[0]) {
         err = "输入影像无投影信息，无法切片";
         CPLFree(dstWkt);
         return false;
     }
-    GDALWarpOptions* wo = GDALCreateWarpOptions();
-    wo->eResampleAlg = parseResampleAlg(resampling);
-    wo->hSrcDS = src;  // Validate 必需
-    wo->hDstDS = nullptr;
-    wo->nBandCount = src->GetRasterCount();
-    wo->panSrcBands =
-        static_cast<int*>(CPLMalloc(sizeof(int) * wo->nBandCount));
-    wo->panDstBands =
-        static_cast<int*>(CPLMalloc(sizeof(int) * wo->nBandCount));
-    for (int b = 0; b < wo->nBandCount; ++b) {
-        wo->panSrcBands[b] = b + 1;
-        wo->panDstBands[b] = b + 1;
-    }
-    wo->pTransformerArg = GDALCreateGenImgProjTransformer(
-        src, srcWkt, nullptr, dstWkt, FALSE, 0.0, 1);
-    if (wo->pTransformerArg == nullptr) {
-        err = "创建 warp 变换器失败";
-        GDALDestroyWarpOptions(wo);
-        CPLFree(dstWkt);
-        return false;
-    }
-    wo->pfnTransformer = GDALGenImgProjTransform;
 
-    // 计算目标网格：源分辨率换算到目标 CRS 单位，采样源网格求目标 bbox
-    // （WarpedVRT 分辨率只需不低于源分辨率即可，瓦片读取时按 buf 缩放）
-    const int srcW = src->GetRasterXSize();
-    const int srcH = src->GetRasterYSize();
-    double srcGt[6];
-    src->GetGeoTransform(srcGt);
-    const double srcRes = std::abs(srcGt[1]);
-    double tRes = srcRes;
-    const bool srcGeo = strstr(srcWkt, "GEOGCS") != nullptr;
-    if (tms.geographic && !srcGeo) tRes = srcRes / M_PER_DEG_TO_DEG;
-    if (!tms.geographic && srcGeo) tRes = srcRes * M_PER_DEG_TO_DEG;
-
-    constexpr int NS = 24;
-    // 含边界的角点网格（(ix+0.5)/NS 中心采样会使 bbox 内缩半格，边缘瓦片错位）
-    const int NP = (NS + 1) * (NS + 1);
-    std::vector<double> xs(NP), ys(NP);
-    for (int iy = 0; iy <= NS; ++iy) {
-        for (int ix = 0; ix <= NS; ++ix) {
-            const int k = iy * (NS + 1) + ix;
-            xs[k] = srcGt[0] + static_cast<double>(ix) / NS * srcGt[1] * srcW;
-            ys[k] = srcGt[3] + static_cast<double>(iy) / NS * srcGt[5] * srcH;
-        }
-    }
-    // 源 → 目标 CRS 的 OSR 直变换（bbox 专用；warp 本身仍用 GenImgProj）
-    OGRSpatialReference srcSrs;
-    srcSrs.importFromWkt(const_cast<char**>(&srcWkt));
-    ip::setTraditionalGisOrder(srcSrs);
-    OGRCoordinateTransformation* ct =
-        OGRCreateCoordinateTransformation(&srcSrs, &dstSrsTrad);
-    if (!ct || !ct->Transform(NP, xs.data(), ys.data())) {
-        err = "源→目标 CRS 变换失败（bbox 计算）";
-        if (ct) OCTDestroyCoordinateTransformation(ct);
-        GDALDestroyWarpOptions(wo);
-        CPLFree(dstWkt);
-        return false;
-    }
-    OCTDestroyCoordinateTransformation(ct);
-    double minX = 1e300, minY = 1e300, maxX = -1e300, maxY = -1e300;
-    for (int i = 0; i < NS * NS; ++i) {
-        minX = std::min(minX, xs[i]);
-        maxX = std::max(maxX, xs[i]);
-        minY = std::min(minY, ys[i]);
-        maxY = std::max(maxY, ys[i]);
-    }
-    const int dstW = std::max(
-        1, static_cast<int>(std::ceil((maxX - minX) / tRes)));
-    const int dstH = std::max(
-        1, static_cast<int>(std::ceil((maxY - minY) / tRes)));
-    double dstGt[6] = {minX, tRes, 0, maxY, 0, -tRes};
-    // 关键：transformer 的 dst 网格默认取 hDstDS（此处为 null → 单位阵），
-    // 必须显式设置目标 geotransform，否则 warp 全部采样到源外（读出全 0）
-    GDALSetGenImgProjTransformerDstGeoTransform(wo->pTransformerArg, dstGt);
-
-    GDALDataset* warped = static_cast<GDALDataset*>(
-        GDALCreateWarpedVRT(src, dstW, dstH, dstGt, wo));
+    // AutoCreateWarpedVRT：自动推算目标网格/变换/DstGeoTransform，规避手工
+    // warp options 的 Validate/DstGeoTransform 系列陷阱（教训 1h）；支持指定
+    // 重采样算法；同 CRS 恒等变换无重采样损失，跨 CRS 由瓦片层重采样兜底
+    GDALDataset* warped = static_cast<GDALDataset*>(GDALAutoCreateWarpedVRT(
+        src, srcWkt, dstWkt, parseResampleAlg(resampling), 0.25, nullptr));
+    CPLFree(dstWkt);
     if (!warped) {
         err = "创建 WarpedVRT 失败";
-        GDALDestroyWarpOptions(wo);
-        CPLFree(dstWkt);
         return false;
     }
-    warped->SetProjection(dstWkt);
 
     double gt[6];
     warped->GetGeoTransform(gt);
@@ -147,8 +65,6 @@ bool buildWarpedVrt(GDALDataset* src, const TileMatrixSet& tms,
     GDALDataset* file = vdrv->CreateCopy(vrtPath.c_str(), warped, FALSE,
                                          nullptr, nullptr, nullptr);
     GDALClose(warped);
-    GDALDestroyWarpOptions(wo);
-    CPLFree(dstWkt);
     if (!file) {
         err = "写出 WarpedVRT 失败: " + vrtPath;
         return false;
@@ -158,7 +74,14 @@ bool buildWarpedVrt(GDALDataset* src, const TileMatrixSet& tms,
 }
 
 GDALDataset* threadLocalWarpDs(const std::string& vrtPath) {
-    thread_local ip::DataSetPtr ds = ip::openReadOnly(vrtPath);
+    // 每线程至多缓存一个 VRT：路径变更即重开（同一渲染任务内路径恒定，热路径
+    // 仅一次字符串比较；多景顺序处理/测试也不会错拿旧句柄）
+    thread_local std::string cachedPath;
+    thread_local ip::DataSetPtr ds;
+    if (cachedPath != vrtPath) {
+        ds = ip::openReadOnly(vrtPath);
+        cachedPath = vrtPath;
+    }
     return ds.get();
 }
 

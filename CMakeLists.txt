@@ -39,6 +39,9 @@ find_package(OpenCV QUIET COMPONENTS core imgproc)
 add_subdirectory(core)
 add_subdirectory(operators)
 add_subdirectory(apps)
+# enable_testing 必须在顶层（CTestTestfile 自顶向下生成）
+enable_testing()
+add_subdirectory(tests)
 
 # 安装规则：仅装交付物（operator 动态库 + exe），core 静态并入动态库不单独安装
 install(TARGETS ip_color_balance ip_tiling color_balance tiling
