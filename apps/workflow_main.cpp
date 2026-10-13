@@ -12,15 +12,18 @@
 //     "ref_image": "H48E018014C"
 //   },
 //   "tiling": {
-//     "input": "",              // 留空 = 自动接匀色镶嵌 VRT
+//     "input": "",              // 留空 = 自动接匀色镶嵌 VRT；填目录 = 多景按景并行
 //     "output_dir": "out/tiles",
 //     "tiling_scheme": "CGCS2000", "min_zoom": 10, "max_zoom": 14,
 //     "format": "png", "build_overviews": "auto",
-//     "package": "gpkg"          // 可选：mbtiles|gpkg 打包单文件（空=散文件）
+//     "package": "gpkg",         // 可选：mbtiles|gpkg 打包单文件（空=散文件）
+//     "num_processes": 1         // input 为目录时按景并行的进程数（>1 派生 workflow 子进程）
 //   }
 // }
 #include "color_balance/i_color_balance.h"
+#include "scene_fanout.h"
 #include "tiling/i_tiling.h"
+#include "tiling/tiling_params_json.h"
 
 #include "ip/json_io.h"
 #include "ip/log.h"
@@ -158,39 +161,33 @@ int main(int argc, char** argv) {
         }
         const ip::Json jt = cfg["tiling"];
         iptl::TilingParams p;
-        if (jt.contains("input")) p.input = jt["input"].get<std::string>();
+        // 全量键解析（与 tiling 算子参数一一对应；overview_policy 别名在解析器内处理）
+        if (!iptl::tilingParamsFromJson(jt, p, err)) {
+            std::cerr << "切片参数错误: " << err << std::endl;
+            return 2;
+        }
         if (p.input.empty()) {
             p.input = mosaicVrt;  // 自动接匀色镶嵌 VRT
             ip::logInfo("tiling.input 未指定 → 使用匀色镶嵌 VRT: " + p.input);
         }
-        if (jt.contains("output_dir")) p.output_dir = jt["output_dir"].get<std::string>();
-        if (jt.contains("tiling_scheme")) p.tiling_scheme = jt["tiling_scheme"].get<std::string>();
-        if (jt.contains("convention")) p.convention = jt["convention"].get<std::string>();
-        if (jt.contains("min_zoom")) p.min_zoom = jt["min_zoom"].get<int>();
-        if (jt.contains("max_zoom")) p.max_zoom = jt["max_zoom"].get<int>();
-        if (jt.contains("tile_size")) p.tile_size = jt["tile_size"].get<int>();
-        if (jt.contains("format")) p.format = jt["format"].get<std::string>();
-        if (jt.contains("resampling")) p.resampling = jt["resampling"].get<std::string>();
-        if (jt.contains("nodata_mode")) p.nodata_mode = jt["nodata_mode"].get<std::string>();
-        if (jt.contains("fill_value")) p.fill_value = jt["fill_value"].get<int>();
-        if (jt.contains("nodata_pct_threshold"))
-            p.nodata_pct_threshold = jt["nodata_pct_threshold"].get<int>();
-        if (jt.contains("skip_empty_tiles")) p.skip_empty_tiles = jt["skip_empty_tiles"].get<bool>();
-        if (jt.contains("num_threads")) p.num_threads = jt["num_threads"].get<int>();
-        if (jt.contains("num_processes")) p.num_processes = jt["num_processes"].get<int>();
-        if (jt.contains("cache_mb")) p.cache_mb = jt["cache_mb"].get<double>();
-        if (jt.contains("tile_buffer")) p.tile_buffer = jt["tile_buffer"].get<int>();
-        if (jt.contains("build_overviews")) p.build_overviews = jt["build_overviews"].get<std::string>();
-        if (jt.contains("overview_policy")) p.build_overviews = jt["overview_policy"].get<std::string>();
-        if (jt.contains("bbox")) p.bbox = jt["bbox"].get<std::string>();
-        if (jt.contains("resume")) p.resume = jt["resume"].get<bool>();
-        if (jt.contains("overwrite")) p.overwrite = jt["overwrite"].get<bool>();
-        if (jt.contains("keep_tmp_vrt")) p.keep_tmp_vrt = jt["keep_tmp_vrt"].get<bool>();
-        if (jt.contains("use_gpu")) p.use_gpu = jt["use_gpu"].get<bool>();
-        if (jt.contains("package")) p.package = jt["package"].get<std::string>();
-        if (jt.contains("package_file"))
-            p.package_file = jt["package_file"].get<std::string>();
-        if (jt.contains("min_mem_gb")) p.min_mem_gb = jt["min_mem_gb"].get<double>();
+
+        // 目录输入 → 按景并行（num_processes<=1 本进程逐景串行，>1 派生子进程）
+        std::error_code ec;
+        if (std::filesystem::is_directory(p.input, ec)) {
+            std::vector<std::string> scenes;
+            if (!ipapp::collectScenes(p.input, scenes, err)) {
+                std::cerr << "切片参数错误: " << err << std::endl;
+                return 2;
+            }
+            ip::logInfo("==== 工作流步骤 2：切片（按景并行）====");
+            ipapp::FanoutStats st;
+            if (!ipapp::runScenesFanout(p, scenes, st, err)) {
+                std::cerr << "切片失败: " << err << std::endl;
+                return 1;
+            }
+            ip::logInfo("==== 工作流完成 ====");
+            return 0;
+        }
 
         iptl::ITiling* tl = createTiling();
         if (!tl) {

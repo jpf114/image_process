@@ -6,6 +6,7 @@ add_executable(ip_tests
     test_tms.cpp
     test_solver.cpp
     test_render.cpp
+    test_params_json.cpp
 )
 target_include_directories(ip_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/operators/color_balance/src

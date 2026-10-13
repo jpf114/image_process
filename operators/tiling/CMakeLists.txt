@@ -2,6 +2,7 @@ add_library(ip_tiling SHARED
     src/tiling.cpp
     src/tile_ctx.cpp
     src/package_sink.cpp
+    src/params_json.cpp
     src/tms.cpp
 )
 target_include_directories(ip_tiling PUBLIC

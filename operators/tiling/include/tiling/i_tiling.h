@@ -32,7 +32,8 @@ struct TilingParams {
     int nodata_pct_threshold = 100;    // 无效占比 ≥ 阈值 → 整瓦片透明/填充（边缘瓦片可 50）
     bool skip_empty_tiles = true;      // 全无效瓦片不落盘
     int num_threads = 0;               // 0 = 物理核数
-    int num_processes = 1;             // 多景任务级并行（V1=1 串行，多进程随 Phase 4 服务化）
+    int num_processes = 1;             // 多景（目录输入）按景并行的进程数；由 app 层
+                                       // （tiling / workflow CLI）消费，算子本身按单输入执行
     double cache_mb = 512;             // GDAL 块缓存（MB，execute 时生效）
     int tile_buffer = 0;               // 增量切片时范围外扩的缓冲瓦片数（覆盖接边带）
     double min_mem_gb = 1.5;           // 内存护栏

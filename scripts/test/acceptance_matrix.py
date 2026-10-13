@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from glob import glob
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN = os.path.join(ROOT, "bin/Release")
@@ -125,8 +126,37 @@ def pkg_tile_diff(pkg_path, ref_dir, table, zoom_shift, tms_row):
     return worst == 0, f"逐像素比对 {checked} 张，最大差 {worst}"
 
 
+def dir_png_diff(a, b):
+    """两个瓦片目录按相对路径配对逐像素比对（PNG 无损，期望完全相同）"""
+    import numpy as np
+    from osgeo import gdal
+    fa = sorted(os.path.relpath(p, a) for p in glob(f"{a}/**/*.png", recursive=True))
+    fb = sorted(os.path.relpath(p, b) for p in glob(f"{b}/**/*.png", recursive=True))
+    if fa != fb:
+        return False, f"文件集合不一致 A={len(fa)} B={len(fb)}"
+    if not fa:
+        return False, "无瓦片可比对"
+    worst = 0
+    for rel in fa:
+        da = gdal.Open(os.path.join(a, rel))
+        db = gdal.Open(os.path.join(b, rel))
+        x = da.ReadAsArray()
+        y = db.ReadAsArray()
+        da = None
+        db = None
+        n = min(x.shape[0], y.shape[0])
+        worst = max(worst, int(np.abs(x[:n].astype(int) - y[:n].astype(int)).max()))
+    return worst == 0, f"逐像素比对 {len(fa)} 张，最大差 {worst}"
+
+
+def chk_f02(rc, out, tag):
+    if "每景子进程" not in out:
+        return False, "未走多进程路径"
+    return dir_png_diff(f"{OUT}/fan_seq", f"{OUT}/fan_par")
+
+
 def make_fixtures():
-    """测试夹具：3 波段 VRT、1 波段影像、workflow 正常/缺段/损坏配置"""
+    """测试夹具：3 波段 VRT、1 波段影像、workflow 正常/缺段/损坏配置、多景目录"""
     from osgeo import gdal  # geo_env
     src = f"{DATA24}/H48E018014C.tif"
     gdal.Translate(f"{OUT}/rgb3.tif", src, bandList=[1, 2, 3])
@@ -145,6 +175,17 @@ def make_fixtures():
                    "tiling": {"output_dir": f"{OUT}/wf_tiles", "tiling_scheme": "CGCS2000",
                               "min_zoom": 13, "max_zoom": 13, "bbox": "105.30,29.02,105.32,29.04",
                               "overview_policy": "no", "num_threads": 4}}, f, indent=2)
+    # 多景（目录输入）相关夹具：坏景目录、空目录、workflow 按景并行配置
+    os.makedirs(f"{OUT}/emptydir", exist_ok=True)
+    os.makedirs(f"{OUT}/scenes_bad", exist_ok=True)
+    for nm in ("s1", "s2"):
+        shutil.copy(f"{OUT}/rgb3.tif", f"{OUT}/scenes_bad/{nm}.tif")
+    shutil.copy(f"{OUT}/rgb1band.tif", f"{OUT}/scenes_bad/bad.tif")
+    with open(f"{OUT}/wf_fan.json", "w") as f:
+        json.dump({"tiling": {"input": f"{OUT}/scenes", "output_dir": f"{OUT}/fan_wf",
+                              "tiling_scheme": "CGCS2000", "min_zoom": 13, "max_zoom": 13,
+                              "bbox": "105.30,29.02,105.32,29.04",
+                              "overview_policy": "no", "num_processes": 2}}, f, indent=2)
 
 
 def main():
@@ -328,6 +369,45 @@ def main():
     case("E07 package 非法值", [T, "--input", f"{OUT}/mosaic_like.vrt", "--output-dir", f"{OUT}/pkg_e7",
                              "--package", "zzz"],
          {2}, tails_has("package 仅支持 mbtiles / gpkg"))
+
+    # ---------- F. 多景按景并行（num_processes，目录输入） ----------
+    scenes = f"{OUT}/scenes"
+    os.makedirs(scenes, exist_ok=True)
+    for nm in ("s1", "s2", "s3"):
+        shutil.copy(f"{OUT}/rgb3.tif", f"{scenes}/{nm}.tif")
+    F_ARGS = ["--tiling-scheme", "CGCS2000", "--min-zoom", "13", "--max-zoom", "13",
+              "--bbox", bbox, "--overview-policy", "no"]
+
+    case("F01 目录输入 串行（num_processes=1）",
+         [T, "--input", scenes, "--output-dir", f"{OUT}/fan_seq", "--num-processes", "1"] + F_ARGS,
+         {0}, lambda rc, o, t: (("本进程逐景串行" in o) and
+                                len(glob(f"{OUT}/fan_seq/*/13/*/*.png")) == 3,
+                                f"景目录 {len(glob(f'{OUT}/fan_seq/*/13/*/*.png'))} 张瓦片（期望 3）"))
+
+    case("F02 目录输入 多进程（num_processes=3）与串行逐像素一致",
+         [T, "--input", scenes, "--output-dir", f"{OUT}/fan_par", "--num-processes", "3"] + F_ARGS,
+         {0}, chk_f02)
+
+    case("F03 失败归集：混入 1 波段景仍产出其余景",
+         [T, "--input", f"{OUT}/scenes_bad", "--output-dir", f"{OUT}/fan_bad",
+          "--num-processes", "2"] + F_ARGS,
+         {1}, lambda rc, o, t: (("景失败" in o) and
+                                len(glob(f"{OUT}/fan_bad/*/13/*/*.png")) == 2,
+                                f"其余景瓦片 {len(glob(f'{OUT}/fan_bad/*/13/*/*.png'))} 张（期望 2）"))
+
+    case("F04 workflow 目录输入按景并行",
+         [W, "--config", f"{OUT}/wf_fan.json", "--only", "tiling"],
+         {0}, lambda rc, o, t: ((("切片（按景并行）" in o) and
+                                 len(glob(f"{OUT}/fan_wf/*/13/*/*.png")) == 3,
+                                 f"景目录 {len(glob(f'{OUT}/fan_wf/*/13/*/*.png'))} 张瓦片（期望 3）")))
+
+    case("F05 目录内无影像 → 参数错误", [T, "--input", f"{OUT}/emptydir",
+                                     "--output-dir", f"{OUT}/fan_e5"] + F_ARGS,
+         {2}, tails_has("未找到影像"))
+
+    case("F06 多进程未指定线程数 → 按 核数/进程数 分摊",
+         [T, "--input", scenes, "--output-dir", f"{OUT}/fan_thr", "--num-processes", "2"] + F_ARGS,
+         {0}, lambda rc, o, t: (("每景线程数" in o), "日志含每景线程数分摊"))
 
     # ---------- C. 性能：匀色方法耗时（2024 四景，vrt 模式） ----------
     for m in ["overlap_adjust", "global_adjust", "block_wallis", "hist_match"]:

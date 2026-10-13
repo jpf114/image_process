@@ -142,9 +142,8 @@ private:
             ip::logWarn("use_gpu=true 但未以 IP_ENABLE_GPU 编译（本期纯 CPU），按 CPU 执行");
 #endif
         }
-        if (params_.num_processes > 1) {
-            ip::logWarn("num_processes>1 的多进程并行随 Phase 4 服务化提供，V1 按单进程执行");
-        }
+        // num_processes 由 app 层（tiling / workflow CLI）消费：目录输入时按景派生
+        // 子进程；算子本身始终处理单输入，此处不做并行（见 AGENT.md §8.19）
         ip::MemGuard::checkOrThrow(params_.min_mem_gb, "开始");
 
         // 1. TMS（打包模式下 configure 已解析并校验，避免重复读自定义 JSON）

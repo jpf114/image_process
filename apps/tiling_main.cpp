@@ -1,9 +1,13 @@
-// tiling CLI（薄壳：解析参数 → 调 operator）
+// tiling CLI（薄壳：解析参数 → 调 operator；目录输入时按景多进程并行）
+#include "color_balance/i_color_balance.h"
+#include "scene_fanout.h"
 #include "tiling/i_tiling.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -24,7 +28,7 @@ void usage() {
            "  --nodata-pct-threshold <100>             无效占比阈值（边缘瓦片可 50）\n"
            "  --skip-empty-tiles <true|false>          默认 true\n"
            "  --num-threads <n>                        默认物理核数\n"
-           "  --num-processes <1>                      多景任务级并行（V1=1，多进程随服务化）\n"
+           "  --num-processes <1>                      目录输入时按景并行的进程数（单输入忽略）\n"
            "  --cache-mb <512>                         GDAL 块缓存（MB）\n"
            "  --tile-buffer <0>                        增量切片外扩缓冲瓦片数\n"
            "  --use-gpu                                GPU 占位（本期纯 CPU，仅告警）\n"
@@ -118,6 +122,27 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
+    }
+
+    // 匀色 VRT（每景 VRTDerivedRasterBand + ip_gain_offset）需进程内注册像素函数；
+    // 幂等注册，放在任何 GDAL 打开之前
+    ensureColorBalancePixelFunc();
+
+    // 目录输入 → 按景并行（num_processes<=1 本进程逐景串行，>1 派生子进程）
+    std::error_code ec;
+    if (!p.input.empty() && std::filesystem::is_directory(p.input, ec)) {
+        std::vector<std::string> scenes;
+        std::string e;
+        if (!ipapp::collectScenes(p.input, scenes, e)) {
+            std::cerr << "参数错误: " << e << std::endl;
+            return 2;
+        }
+        ipapp::FanoutStats st;
+        if (!ipapp::runScenesFanout(p, scenes, st, e)) {
+            std::cerr << "执行失败: " << e << std::endl;
+            return 1;
+        }
+        return 0;
     }
 
     std::string err;

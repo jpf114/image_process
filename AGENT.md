@@ -15,9 +15,10 @@
 
 - **Phase 0（Python 验证）6/6 PASS**；**Phase 1（core+color_balance）→ Phase 2（tiling）→ Phase 3（apps+workflow）全部完成并数据级验证**；S1 差距补齐、S2 单元测试（gtest）完成。
 - **本轮（2026-10-13）独立完整复核并逐项修复**：交付包漏 workflow、workflow 未接 profile_mode/输出/目标等参数、profile_mode 无校验且 apply/recreate 缺失、target_mean/std 缺失、参数命名偏离方案、断点续跑计数重复、OpenCV 冗余依赖——详见 §6 计划表末行、§8 教训 11/12、§9 验证表。
-- 当前测试用例 **24/24 通过**（`cd build/release && ctest --output-on-failure`）。
+- 当前测试用例 **28/28 通过**（`cd build/release && ctest --output-on-failure`）。
 - **S3 Phase 4 服务化已完成（2026-10-13）**：`ip_server`（cpp-httplib 控制面 + 任务队列/状态机 + worker 进程池 fork/exec）+ REST 5 端点 + 静态瓦片 + Dockerfile（镜像已构建并容器内端到端实测）。用法见 [服务化使用说明.md](文档资料/关于栅格切片和匀色/服务化使用说明.md)，设计论证见 [Phase4服务化论证报告.md](文档资料/关于栅格切片和匀色/Phase4服务化论证报告.md)。
-- 待办：`num_processes` 真多进程（服务化已提供任务级并行的替代路径）；`sample_fill` 采样填充、重叠区羽化、GPU 路径（均为方案后期项，按需启动）。
+- 待办：`sample_fill` 采样填充、重叠区羽化、GPU 路径（均为方案后期项，按需启动）。
+- **S4/S5 已完成（2026-10-13）**：S4 = tiling `package=mbtiles|gpkg` 单文件包；S5 = 目录输入按景 `num_processes` 并行（app 层编排）。测试：单元 **28/28**、验收矩阵 **60/60**。
 - 测试数据：`文档资料/关于栅格切片和匀色/data/{2024,2025}`（2024 四景 2m EPSG:4490 标准图幅；2025 GF2 0.8m 极暗、33% 无效区）
 
 ## 3. 硬性规范（违反即返工）
@@ -107,6 +108,7 @@ image_process/
 | 第三轮审计+补测 | 三路只读审查（26 项发现）→ 修复高 5/中 9/低 12；补测：单元 24/24、验收矩阵 47/47、服务化专项 14/14、压测 13/13 | ✅ 完成（2026-10-13，见 [测试文档.md](文档资料/关于栅格切片和匀色/测试文档.md)） |
 | 复核修复 | 独立完整复核（算法/需求/测试/方案）发现缺陷逐项修复：安装漏件、workflow 参数、profile_mode 校验+apply/recreate、target_mean/std、参数别名、续跑计数、OpenCV 冗余 | ✅ 完成（2026-10-13，24/24 通过 + CLI/workflow 冒烟） |
 | S4 打包输出 | tiling `package=mbtiles\|gpkg`（GDAL 驱动逐瓦片块写、增量 UPSERT、包内元数据修正） | ✅ 完成（2026-10-13，验收矩阵 E 组 7 项；包内瓦片与散文件**逐像素一致**） |
+| S5 多景按景并行 | tiling/workflow 目录输入 → `num_processes` 子进程各切一景；每景独立输出目录 | ✅ 完成（2026-10-13，验收矩阵 F 组 6 项；多进程与串行**逐像素一致**；顺带修复 tiling CLI 读每景匀色 VRT 失败） |
 
 ## 7. 常用命令
 
@@ -126,7 +128,7 @@ export LD_LIBRARY_PATH=$HOME/vcpkg/installed/x64-linux/lib:$LD_LIBRARY_PATH
 export GDAL_DATA=$HOME/vcpkg/installed/x64-linux/share/gdal
 export PROJ_DATA=$HOME/vcpkg/installed/x64-linux/share/proj
 
-# 单元测试（24 用例；enable_testing 在顶层 CMakeLists，ctest 须在 build/release 下执行）
+# 单元测试（28 用例；enable_testing 在顶层 CMakeLists，ctest 须在 build/release 下执行）
 cd build/release && ctest --output-on-failure
 bin/Release/color_balance --input <影像|目录> --output-dir <目录> --ref-image <参考景>
 bin/Release/workflow --config <workflow.json> [--only color|tiling]
@@ -134,6 +136,8 @@ bin/Release/tiling --input <影像|VRT> --output-dir <目录> --tiling-scheme We
   --max-zoom 9 --package mbtiles          # S4 打包：单文件 MBTiles（散文件不落盘）
 bin/Release/tiling --input <影像|VRT> --output-dir <目录> --tiling-scheme CGCS2000 \
   --min-zoom 13 --max-zoom 13 --bbox 105.30,29.02,105.32,29.04 --package gpkg
+bin/Release/tiling --input <多景目录> --output-dir <目录> --num-processes 3 \
+  --tiling-scheme CGCS2000 --max-zoom 13   # S5 按景并行：每景输出 <目录>/<景名>/…
 
 # 服务化（Phase 4）：控制面 + worker 进程池；用法见《服务化使用说明.md》
 bin/Release/ip_server --data-dir ipdata --tiles-dir out/tiles --port 8080 --workers 2
@@ -184,6 +188,14 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
     - **`metadata` 写入经 OGR SQLite 驱动**：MBTiles 驱动关闭时把 minzoom/maxzoom 写成"当次句柄层级"，与包内容不符，需收尾修正；且 **OGR `ExecuteSQL` 一次只执行一条语句**（`DELETE ...; INSERT ...` 只会执行前半条）。
 17. **GPKG 的 TILING_SCHEME JSON 数值必须用 double 往返精度（`%.17g`）**：GDAL 解析时校验"相邻层级分辨率严格为 2 倍"，`%.10g` 之类的截断会触发 `Unsupported tiling scheme: resolution of consecutive zoom levels is not always 2`。
 18. **包内 zoom_level = TMS 矢量索引（0 基），非目录层级号**：GPKG/MBTiles 的 `zoom_level` 取 TILING_SCHEME JSON 中的**数组下标**（GDAL 不使用 `identifier`）。故 CGCS2000（目录层级从 1 起）包内 `zoom_level = 目录层级 − 1`；WebMercatorQuad 二者相同。`tile_row`：MBTiles 为 TMS（自下而上），GPKG 为 XYZ（自上而下），由 GDAL 自行换算。
+19. **`num_processes` 真多进程 = 目录输入 → 按景并行（app 层编排，算子保持单输入）**：语义见《技术方案》§5.2 与《后续执行方案》§1.4。实现要点：
+    - **归属**：编排在 `apps/`（`scene_fanout`，tiling 与 workflow 共用），`iptl::ITiling` 不做进程管理——与 Phase 4「operators=算法、apps=编排」分层一致；算子收到 `num_processes` 仅记录不并行（每次执行都是单输入）。
+    - **输出布局**：每景独立 `<output_dir>/<场景名>/…`（同名场景加 `_2` 去重），进程间互不写同一文件；`_fanout/` 临时 JSON 用后清理（`keep_tmp_vrt` 保留）。
+    - **子进程镜像**：与当前可执行文件同目录的 `workflow`（`/proc/self/exe` 定位），命令为 `workflow --config <每景参数 JSON> --only tiling`——复用 workflow 的配置解析入口，避免"命令行重建参数"漏字段。
+    - **参数传递必须可往返**：`tilingParamsToJson/FromJson`（`tiling/tiling_params_json.h`）是唯一来源，gtest `TilingParamsJson.RoundTripAllFields` 锁死全字段一致；workflow 的切片段解析也改走该入口（原先 30 行逐键 `if` 已收敛）。
+    - **并发与线程**：最多 `num_processes` 个子进程在跑（完成一个补一个）；未显式指定 `num_threads` 时每景线程按 `核数/进程数` 分摊（避免 `0=全核` 造成超订，与 §8.15 的容量规则一致）。
+    - **失败语义**：单景失败不影响其余景（继续跑完并汇总），最终返回非 0 并在 stderr 给出「N/M 景失败（首个失败 …）」。
+20. **独立 `tiling` CLI 读"每景匀色 VRT"曾必然失败（实测修复）**：每景匀色 VRT 用 `VRTDerivedRasterBand` + `PixelFunctionType=ip_gain_offset`，而像素函数是**进程内注册**的（`ensureColorBalancePixelFunc()`）。`tiling_main` 原先未注册 → `Derived band pixel function 'ip_gain_offset' not registered`，退出码 1（镶嵌 `mosaic.vrt` 走 ComplexSource + ScaleRatio/ScaleOffset，不需要该函数，故此前测试未暴露）。定稿：`tiling` 也链 `ip_color_balance` 并在任何 GDAL 打开前幂等注册；多进程模式的子进程由 `workflow` 承担，天然已注册。
 
 ## 9. 迭代 2 与 Phase 2 验证结果（2026-10-13）
 
@@ -210,6 +222,9 @@ conda activate geo_env && python scripts/phase0/<脚本>.py
 | **S4 打包（MBTiles）** | 标准 MBTiles 1.1 schema（`tiles(zoom_level,tile_column,tile_row,tile_data)` 唯一索引）；z0~z9 共 10 瓦片；`metadata.minzoom/maxzoom` 由收尾修正为 0/9（驱动自写值不可信）；10 张瓦片与散文件 PNG **最大差 0** |
 | **S4 打包（GPKG）** | `gpkg_tile_matrix` 登记 0~12 全层级（CGCS2000 目录层 13 → 包内 zoom_level 12）、`gpkg_tile_matrix_set` srs_id=4490 / min(-180,-90) max(180,90)；瓦片与散文件 **最大差 0**；GDAL 读回 2097152×1048576×4 波段 |
 | **S4 增量追加** | 同 bbox 二次运行 → 瓦片数不变（UPSERT）；相邻 bbox → 1→2 张，包体持续可用 |
+| **S5 多景按景并行** | 目录输入 3 景：`num_processes=1` 本进程逐景串行、`=3` 派生子进程——两者产物**逐像素最大差 0**；每景输出 `<out>/<景名>/…`；`_fanout/` 临时 JSON 自动清理；失败归集：混入 1 波段景 → 退出码 1 且其余 2 景仍产出；workflow 目录输入同路径实测通过 |
+| **S5 参数往返** | gtest `TilingParamsJson` 4 用例（全字段往返 / 缺键保默认 / overview_policy 别名 / 类型错误），28/28 通过 |
+| **tiling 读每景匀色 VRT（修复）** | 修复前：`ip_gain_offset not registered` → 退出 1；修复后同命令 z0~z11 写出 17 瓦片、0 错误（0.29s） |
 
 ## 9.1 workflow 管线结构（2026-10-13 定稿）
 
