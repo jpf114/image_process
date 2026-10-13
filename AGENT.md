@@ -103,7 +103,8 @@ image_process/
 | Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | ✅ 完成 |
 | Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | ✅ 完成（2026-10-13；见《服务化使用说明.md》） |
 | S1 差距补齐 | 方案承诺项闭环（每景 COG/镶嵌 COG/append 增量/参数补齐） | ✅ 完成（2026-10-13） |
-| S2 单元测试 | gtest 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过 + 真实影像冒烟） |
+| S2 单元测试 | gtest 用例（block_stats/tms/solver/render 四套件）+ 顶层 enable_testing | ✅ 完成（2026-10-13，23/23 通过；第三轮审计新增 resume 用例后 **24/24**） |
+| 第三轮审计+补测 | 三路只读审查（26 项发现）→ 修复高 5/中 9/低 12；补测：单元 24/24、验收矩阵 47/47、服务化专项 14/14、压测 13/13 | ✅ 完成（2026-10-13，见 [测试文档.md](文档资料/关于栅格切片和匀色/测试文档.md)） |
 | 复核修复 | 独立完整复核（算法/需求/测试/方案）发现缺陷逐项修复：安装漏件、workflow 参数、profile_mode 校验+apply/recreate、target_mean/std、参数别名、续跑计数、OpenCV 冗余 | ✅ 完成（2026-10-13，24/24 通过 + CLI/workflow 冒烟） |
 
 ## 7. 常用命令
