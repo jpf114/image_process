@@ -93,9 +93,10 @@ image_process/
 | Phase 1 | core + color_balance：overlap_adjust（统计/门控/图平差/块式应用/方案 JSON）+ CLI + 构建打包体系 | ✅ 完成，2024+GF2 双路径验证通过 |
 | Phase 1 迭代 2 | 最小二乘图平差 + block_wallis + hist_match + VRT 零落盘输出（含组合模式） | ✅ 全部完成并验证 |
 | Phase 2 | tiling operator：TMS 三内置+JSON、WarpedVRT+线程池并行、nodata 模式、png/jpeg/webp | ✅ 核心完成并验证（CGCS2000 格网与 GDAL CLI 逐级一致；GF2 透明对策一致） |
-| Phase 2 收尾 | 性能优化（overview 利用）、MBTiles/GPKG 打包、tiles_scope 增量切片 | 待开始 |
-| Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | 待开始 |
-| Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | 待开始 |
+| Phase 2 收尾 | 性能优化（overview 利用）、MBTiles/GPKG 打包、tiles_scope 增量切片 | ✅ auto overview/bbox/tile_buffer 已实现；MBTiles/GPKG 见《后续执行方案》S4 |
+| Phase 3 | apps + workflow（三 exe、JSON 配置、断点续跑、端到端验收） | ✅ 完成 |
+| Phase 4 | 服务化（cpp-httplib + worker 进程池、Dockerfile） | 待启动（设计见《后续执行方案》§二） |
+| S1 差距补齐 | 方案承诺项闭环（每景 COG/镶嵌 COG/append 增量/参数补齐） | ✅ 完成（2026-10-13） |
 
 ## 7. 常用命令
 

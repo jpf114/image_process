@@ -29,6 +29,7 @@ struct ColorBalanceParams {
     // global_adjust：全局统计目标（仅完全无重叠时回退）
     std::string ref_image;              // 空 = 排序后第一景
     std::string output_mode = "tif";    // tif：每景 GeoTIFF | vrt：匀色 VRT+镶嵌 VRT（零像素落盘；wallis 景仍物理输出）
+    std::string profile_mode = "create"; // create（新建方案）| append（新影像按既有方案对齐：方案内景参数冻结，新景由重叠区解参并追加）
     std::string scene_format = "gtiff"; // 物理每景输出布局：gtiff（DEFLATE tiled）| cog（COG 布局，方案 §4.2 per_scene_cog）
     bool mosaic_cog = false;            // vrt 模式下额外输出物理镶嵌 COG（方案 §4.2 balance_and_mosaic）
     double seam_check_threshold = 2.0;  // 重叠对 |Δμ|（波段最大值）低于此值 → 跳过调节

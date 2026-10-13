@@ -12,6 +12,7 @@ output/
 .vscode/
 .idea/
 .DS_Store
+.cache/
 
 # GDAL 辅助
 *.aux.xml

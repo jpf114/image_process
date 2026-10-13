@@ -155,6 +155,8 @@ private:
         if (params_.use_gpu) {
             ip::logWarn("use_gpu=true 但本期为纯 CPU 实现（接口占位），按 CPU 执行");
         }
+        // 方案追加模式：既有景参数冻结，新景由重叠区解参并追加（方案 §4.4 场景 1）
+        if (params_.profile_mode == "append") return runAppend(cb, err);
 
         // 1. 收集输入
         std::vector<std::string> files;
@@ -639,6 +641,313 @@ private:
             ip::logInfo("  边 " + scenes_[ce.e->a].id + "|" + scenes_[ce.e->b].id +
                         " 均衡后残差(max)=" + fmt1(m) + " (" +
                         fmt3(ce.e->residualAfter) + ")");
+        }
+        return true;
+    }
+
+    // ============ append 模式（方案 §4.4 场景 1）============
+    // inputs=新影像；profile_path=既有方案。既有景参数从方案冻结加载，
+    // 新景与既有景重叠区解参（对齐"邻景调节后"统计，多边取均值），追加方案与镶嵌 VRT。
+    bool runAppend(const ProgressCallback& cb, std::string& err) {
+        if (params_.output_mode != "vrt") {
+            err = "append 模式仅支持 output_mode=vrt（零像素落盘管线）";
+            return false;
+        }
+        if (params_.method != "overlap_adjust") {
+            err = "append 模式仅支持 method=overlap_adjust";
+            return false;
+        }
+        ip::Json prof;
+        if (!ip::readJsonFile(params_.profile_path, prof, err)) {
+            err = "读取既有方案失败: " + err;
+            return false;
+        }
+        ip::logInfo("append 模式：既有方案 " + params_.profile_path);
+
+        // 1. 既有景从方案加载（参数冻结）
+        std::vector<Scene> fixed;
+        std::vector<SceneSnapshot> snaps;
+        for (const auto& ji : prof["images"]) {
+            Scene s;
+            s.path = ji["source"].get<std::string>();
+            s.id = ji["id"].get<std::string>();
+            s.ds = ip::openReadOnly(s.path);
+            if (!s.ds) {
+                err = "方案内影像不在场（VRT 是引用，需保证原始影像在位）: " + s.path;
+                return false;
+            }
+            s.w = s.ds->GetRasterXSize();
+            s.h = s.ds->GetRasterYSize();
+            s.ds->GetGeoTransform(s.gt);
+            s.extent = ip::datasetExtent(s.ds.get());
+            for (int b = 0; b < 3; ++b) {
+                s.stats.mean[b] = ji["stats"]["mean"][b].get<double>();
+                s.stats.std[b] = ji["stats"]["std"][b].get<double>();
+                s.gain[b] = ji["transform"]["gain"][b].get<double>();
+                s.offset[b] = ji["transform"]["offset"][b].get<double>();
+            }
+            s.paramsSet = true;
+            fixed.push_back(std::move(s));
+        }
+        if (fixed.empty()) {
+            err = "方案内无影像记录";
+            return false;
+        }
+        ip::logInfo("方案内既有景 " + std::to_string(fixed.size()) + " 景（参数冻结）");
+
+        // 2. 新景收集与统计
+        std::vector<std::string> files;
+        std::string cerr_;
+        for (const auto& in : params_.inputs) {
+            collectInputFiles(in, files, cerr_);
+            if (!cerr_.empty()) {
+                err = cerr_;
+                return false;
+            }
+        }
+        if (files.empty()) {
+            err = "未找到新影像";
+            return false;
+        }
+        scenes_.clear();
+        for (const auto& f : files) {
+            Scene s;
+            s.path = f;
+            s.id = fs::path(f).stem().string();
+            s.ds = ip::openReadOnly(f);
+            if (!s.ds) {
+                err = "无法打开新影像: " + f;
+                return false;
+            }
+            s.w = s.ds->GetRasterXSize();
+            s.h = s.ds->GetRasterYSize();
+            s.ds->GetGeoTransform(s.gt);
+            s.extent = ip::datasetExtent(s.ds.get());
+            if (const OGRSpatialReference* srs = s.ds->GetSpatialRef()) {
+                const char* code = srs->GetAuthorityCode(nullptr);
+                s.crs = code ? code : "";
+            }
+            ip::MemGuard::checkOrThrow(params_.min_mem_gb, "新景统计前");
+            report(cb, 10, "精确统计(新) " + s.id);
+            s.stats = ip::exactStatsRGB(s.ds.get());
+            scenes_.push_back(std::move(s));
+        }
+        for (auto& s : scenes_) {
+            s.paramsSet = true;
+            s.note = "append 新景";
+        }
+
+        // 3. 新景 × 既有景 重叠边 → 对齐"邻景调节后"统计（多边取均值；门控优先）
+        for (auto& N : scenes_) {
+            struct Cand {
+                double lg[3], muT[3];
+            };
+            std::vector<Cand> cands;
+            bool identity = false;
+            for (const auto& F : fixed) {
+                GeoExtent inter;
+                inter.minX = std::max(N.extent.minX, F.extent.minX);
+                inter.minY = std::max(N.extent.minY, F.extent.minY);
+                inter.maxX = std::min(N.extent.maxX, F.extent.maxX);
+                inter.maxY = std::min(N.extent.maxY, F.extent.maxY);
+                if (inter.minX >= inter.maxX || inter.minY >= inter.maxY) continue;
+                int ax0, ay0, aw, ah, bx0, by0, bw, bh;
+                if (!ip::geoBoundsToPixelWindow(N.ds.get(), inter, ax0, ay0, aw, ah) ||
+                    !ip::geoBoundsToPixelWindow(F.ds.get(), inter, bx0, by0, bw, bh)) {
+                    continue;
+                }
+                if (std::min(aw, ah) < params_.min_overlap_px ||
+                    std::min(bw, bh) < params_.min_overlap_px) {
+                    continue;
+                }
+                const BandStats3 ovN = ip::windowStatsRGB(
+                    N.ds.get(), ax0, ay0, aw, ah, params_.overlap_max_side);
+                const BandStats3 ovF = ip::windowStatsRGB(
+                    F.ds.get(), bx0, by0, bw, bh, params_.overlap_max_side);
+                double dm = 0;
+                for (int b = 0; b < 3; ++b)
+                    dm = std::max(dm, std::abs(ovF.mean[b] - ovN.mean[b]));
+                if (dm < params_.seam_check_threshold) {
+                    N.note = "与 " + F.id + " 接边连续，恒等保持";
+                    identity = true;
+                    break;
+                }
+                Cand c;
+                for (int b = 0; b < 3; ++b) {
+                    const double muF = F.gain[b] * ovF.mean[b] + F.offset[b];
+                    const double sdF = std::max(F.gain[b] * ovF.std[b], 1e-3);
+                    c.lg[b] = std::log(sdF / std::max(ovN.std[b], 1e-3));
+                    c.muT[b] = muF;
+                }
+                cands.push_back(c);
+                ip::logInfo("  边 " + N.id + "|" + F.id + " Δμ(max)=" + fmt1(dm));
+            }
+            if (identity) continue;
+            if (cands.empty()) {
+                N.note = "与既有方案无重叠，保持原样";
+                ip::logWarn("  " + N.id + " " + N.note);
+                continue;
+            }
+            for (int b = 0; b < 3; ++b) {
+                double acc = 0;
+                for (const auto& c : cands) acc += c.lg[b];
+                N.gain[b] =
+                    std::min(std::max(std::exp(acc / cands.size()), 0.2), 5.0);
+            }
+            // offset = mean(邻景调节后 μ) − gain · mean(新景重叠区 μ)
+            {
+                int nE = 0;
+                double ovAcc[3] = {0, 0, 0}, muFAcc[3] = {0, 0, 0};
+                for (const auto& F : fixed) {
+                    GeoExtent inter;
+                    inter.minX = std::max(N.extent.minX, F.extent.minX);
+                    inter.minY = std::max(N.extent.minY, F.extent.minY);
+                    inter.maxX = std::min(N.extent.maxX, F.extent.maxX);
+                    inter.maxY = std::min(N.extent.maxY, F.extent.maxY);
+                    if (inter.minX >= inter.maxX || inter.minY >= inter.maxY) continue;
+                    int ax0, ay0, aw, ah, bx0, by0, bw, bh;
+                    if (!ip::geoBoundsToPixelWindow(N.ds.get(), inter, ax0, ay0, aw, ah) ||
+                        !ip::geoBoundsToPixelWindow(F.ds.get(), inter, bx0, by0, bw, bh)) {
+                        continue;
+                    }
+                    const BandStats3 ovN = ip::windowStatsRGB(
+                        N.ds.get(), ax0, ay0, aw, ah, params_.overlap_max_side);
+                    const BandStats3 ovF = ip::windowStatsRGB(
+                        F.ds.get(), bx0, by0, bw, bh, params_.overlap_max_side);
+                    double dm = 0;
+                    for (int b = 0; b < 3; ++b)
+                        dm = std::max(dm, std::abs(ovF.mean[b] - ovN.mean[b]));
+                    if (dm < params_.seam_check_threshold) continue;
+                    for (int b = 0; b < 3; ++b) {
+                        ovAcc[b] += ovN.mean[b];
+                        muFAcc[b] += F.gain[b] * ovF.mean[b] + F.offset[b];
+                    }
+                    ++nE;
+                }
+                if (nE > 0) {
+                    for (int b = 0; b < 3; ++b) {
+                        N.offset[b] =
+                            muFAcc[b] / nE - N.gain[b] * ovAcc[b] / nE;
+                    }
+                    N.adjusted = true;
+                    N.note = "append 重叠区解参（" + std::to_string(nE) +
+                             " 条边均衡）";
+                    ip::logInfo("  新景 " + N.id + " gain=" + fmt3(N.gain) +
+                                " offset=" + fmt3(N.offset));
+                }
+            }
+        }
+
+        // 4. 生成新景匀色 VRT + 汇集镶嵌源（既有景来自方案，新景来自本轮解参）
+        fs::create_directories(params_.output_dir);
+        std::vector<std::string> outPaths;
+        std::vector<VrtSource> vrtSources;
+        for (const auto& ji : prof["images"]) {
+            VrtSource vs;
+            vs.path = ji["source"].get<std::string>();
+            for (int b = 0; b < 3; ++b) {
+                vs.gain[b] = ji["transform"]["gain"][b].get<double>();
+                vs.offset[b] = ji["transform"]["offset"][b].get<double>();
+            }
+            vrtSources.push_back(std::move(vs));
+        }
+        for (size_t i = 0; i < scenes_.size(); ++i) {
+            Scene& S = scenes_[i];
+            report(cb, 50 + static_cast<int>(40 * (i + 1) / scenes_.size()),
+                   "生成匀色 VRT(新) " + S.id);
+            const std::string vp =
+                (fs::path(params_.output_dir) /
+                 (fs::path(S.path).stem().string() + "_balanced.vrt"))
+                    .string();
+            if (!writeBalancedVrt(S.ds.get(), vp, S.gain, S.offset, err)) return false;
+            if (!verifyBalancedVrt(S.ds.get(), vp, S.gain, S.offset, err)) return false;
+            outPaths.push_back(vp);
+        }
+        // 5. 重写镶嵌 VRT（全部源，extent/尺寸统一补齐）
+        for (auto& vs : vrtSources) {
+            auto d0 = ip::openReadOnly(vs.path);
+            if (d0) {
+                const GeoExtent e = ip::datasetExtent(d0.get());
+                vs.minX = e.minX; vs.minY = e.minY;
+                vs.maxX = e.maxX; vs.maxY = e.maxY;
+                vs.rasterX = d0->GetRasterXSize();
+                vs.rasterY = d0->GetRasterYSize();
+            }
+        }
+        for (size_t i = 0; i < scenes_.size(); ++i) {
+            Scene& S = scenes_[i];
+            VrtSource vs;
+            vs.path = S.path;
+            vs.minX = S.extent.minX;
+            vs.minY = S.extent.minY;
+            vs.maxX = S.extent.maxX;
+            vs.maxY = S.extent.maxY;
+            for (int b = 0; b < 3; ++b) {
+                vs.gain[b] = S.gain[b];
+                vs.offset[b] = S.offset[b];
+            }
+            vs.rasterX = S.w;
+            vs.rasterY = S.h;
+            vrtSources.push_back(std::move(vs));
+        }
+        const std::string mosaicPath =
+            (fs::path(params_.output_dir) / "mosaic.vrt").string();
+        if (!writeMosaicVrt(vrtSources, scenes_[0].ds->GetRasterCount(),
+                            mosaicPath, err)) {
+            return false;
+        }
+        ip::logInfo("镶嵌 VRT 已更新: " + mosaicPath);
+
+        // 6. 方案 JSON 追加新记录并保存（版本化=备份）
+        for (size_t i = 0; i < scenes_.size(); ++i) {
+            SceneSnapshot t;
+            t.id = scenes_[i].id;
+            t.path = scenes_[i].path;
+            for (int b = 0; b < 3; ++b) {
+                t.mean[b] = scenes_[i].stats.mean[b];
+                t.std[b] = scenes_[i].stats.std[b];
+                t.gain[b] = scenes_[i].gain[b];
+                t.offset[b] = scenes_[i].offset[b];
+            }
+            t.adjusted = scenes_[i].adjusted;
+            t.note = scenes_[i].note;
+            t.outputPath = i < outPaths.size() ? outPaths[i] : "";
+            snaps.push_back(std::move(t));
+        }
+        for (const auto& t : snaps) {
+            prof["images"].push_back({
+                {"id", t.id},
+                {"source", t.path},
+                {"stats", {{"mean", std::vector<double>(t.mean, t.mean + 3)},
+                           {"std", std::vector<double>(t.std, t.std + 3)}}},
+                {"transform",
+                 {{"gain", std::vector<double>(t.gain, t.gain + 3)},
+                  {"offset", std::vector<double>(t.offset, t.offset + 3)}}},
+                {"adjusted", t.adjusted},
+                {"note", t.note},
+                {"balanced_output", t.outputPath},
+            });
+        }
+        prof["appended_at"] = static_cast<long long>(std::time(nullptr));
+        std::string werr;
+        if (!ip::writeJsonFile(params_.profile_path, prof, werr)) {
+            err = werr;
+            return false;
+        }
+        ip::logInfo("方案已追加保存: " + params_.profile_path);
+
+        // 7. 增量切片建议（新景 extent，源 CRS，可喂给 tiling --bbox）
+        for (const auto& S : scenes_) {
+            ip::logInfo("增量切片建议 bbox（源 CRS）: " + std::to_string(S.extent.minX) +
+                        "," + std::to_string(S.extent.minY) + "," +
+                        std::to_string(S.extent.maxX) + "," +
+                        std::to_string(S.extent.maxY) + "（" + S.id + "）");
+        }
+        report(cb, 100, "append 完成");
+        ip::logInfo("==== append 摘要 ====");
+        for (const auto& S : scenes_) {
+            ip::logInfo("  " + S.id + ": " + S.note +
+                        (S.adjusted ? "（gain=" + fmt3(S.gain) + "）" : ""));
         }
         return true;
     }

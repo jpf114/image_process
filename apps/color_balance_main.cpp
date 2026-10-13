@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
             p.scene_format = need("--scene-format");
         } else if (a == "--mosaic-cog") {
             p.mosaic_cog = true;
+        } else if (a == "--profile-mode") {
+            p.profile_mode = need("--profile-mode");
         } else if (a == "--profile") {
             p.profile_path = need("--profile");
         } else if (a == "--no-profile") {
