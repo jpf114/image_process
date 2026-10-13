@@ -91,6 +91,14 @@ private:
             ip::logSetFile(logPath);
             ip::logInfo("==== tiling 开始 ====，日志: " + logPath);
         }
+        // 块缓存与 GPU 占位
+        GDALSetCacheMax(static_cast<int>(params_.cache_mb * 1024));  // KB
+        if (params_.use_gpu) {
+            ip::logWarn("use_gpu=true 但本期为纯 CPU 实现（接口占位），按 CPU 执行");
+        }
+        if (params_.num_processes > 1) {
+            ip::logWarn("num_processes>1 的多进程并行随 Phase 4 服务化提供，V1 按单进程执行");
+        }
         ip::MemGuard::checkOrThrow(params_.min_mem_gb, "开始");
 
         // 1. TMS
@@ -200,6 +208,16 @@ private:
                                 extent.minX, extent.minY, extent.maxX,
                                 extent.maxY, tx0, ty0, tx1, ty1)) {
                 continue;
+            }
+            // 增量切片外扩缓冲（覆盖接边带；levelTileRange 已裁剪，此处手动扩并夹取）
+            const long long buf = params_.tile_buffer;
+            if (buf > 0) {
+                tx0 = std::max<long long>(tx0 - buf, 0);
+                ty0 = std::max<long long>(ty0 - buf, 0);
+                tx1 = std::min<long long>(tx1 + buf,
+                                          tms_.level(z).matrixW - 1);
+                ty1 = std::min<long long>(ty1 + buf,
+                                          tms_.level(z).matrixH - 1);
             }
             for (long long ty = ty0; ty <= ty1; ++ty) {
                 for (long long tx = tx0; tx <= tx1; ++tx) {

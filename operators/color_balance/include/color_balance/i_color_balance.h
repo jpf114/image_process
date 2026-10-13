@@ -29,14 +29,18 @@ struct ColorBalanceParams {
     // global_adjust：全局统计目标（仅完全无重叠时回退）
     std::string ref_image;              // 空 = 排序后第一景
     std::string output_mode = "tif";    // tif：每景 GeoTIFF | vrt：匀色 VRT+镶嵌 VRT（零像素落盘；wallis 景仍物理输出）
+    std::string scene_format = "gtiff"; // 物理每景输出布局：gtiff（DEFLATE tiled）| cog（COG 布局，方案 §4.2 per_scene_cog）
+    bool mosaic_cog = false;            // vrt 模式下额外输出物理镶嵌 COG（方案 §4.2 balance_and_mosaic）
     double seam_check_threshold = 2.0;  // 重叠对 |Δμ|（波段最大值）低于此值 → 跳过调节
     int min_overlap_px = 8;             // 重叠窗口最小边长（像素），小于视为无重叠
     int overlap_max_side = 2048;        // 重叠区统计读取最大边（tile 采样上限，控内存）
     int apply_chunk = 2048;             // 应用阶段行块高（块式处理，恒定内存）
     int block_size = 512;               // Wallis 分块大小（像素）
+    double wallis_target_std = -1.0;    // Wallis 目标 σ（-1 = 参考景统计；>0 用显式值，μ 仍取参考景）
     bool write_profile = true;          // 是否输出匀色方案 JSON
     std::string profile_path;           // 默认 <output_dir>/_profile.json
     double min_mem_gb = 1.5;            // 内存护栏阈值
+    bool use_gpu = false;               // GPU 占位（本期纯 CPU，开启仅告警）
 };
 
 using ProgressCallback = std::function<void(int percent, const std::string& msg)>;

@@ -16,12 +16,16 @@ void usage() {
            "  --method <overlap_adjust|overlap_adjust+wallis|block_wallis|hist_match|global_adjust>\n"
            "                                           默认 overlap_adjust\n"
            "  --output-mode <tif|vrt>                  vrt=匀色 VRT+镶嵌 VRT（零像素落盘）\n"
+           "  --scene-format <gtiff|cog>               每景物理输出布局（默认 gtiff）\n"
+           "  --mosaic-cog                             vrt 模式下额外输出物理镶嵌 COG\n"
            "  --ref-image <路径>                       参考影像（默认排序后第一景）\n"
            "  --seam-threshold <2.0>                   接边一致性阈值（|Δμ| 低于则跳过调节）\n"
            "  --min-overlap-px <8>                     重叠窗口最小边长（像素）\n"
            "  --overlap-max-side <2048>                重叠区统计采样上限（tile 采样，控内存）\n"
            "  --chunk <2048>                           应用阶段行块高\n"
            "  --block-size <512>                       Wallis 分块大小\n"
+           "  --wallis-target-std <-1|值>              Wallis 目标 σ（-1=参考景统计）\n"
+           "  --use-gpu                                GPU 占位（本期纯 CPU，仅告警）\n"
            "  --profile <路径>                         方案 JSON 输出路径（默认 <out>/_profile.json）\n"
            "  --no-profile                             不写方案文件\n"
            "  --min-mem-gb <1.5>                       内存护栏阈值\n"
@@ -65,8 +69,16 @@ int main(int argc, char** argv) {
             p.apply_chunk = std::atoi(need("--chunk"));
         } else if (a == "--block-size") {
             p.block_size = std::atoi(need("--block-size"));
+        } else if (a == "--wallis-target-std") {
+            p.wallis_target_std = std::atof(need("--wallis-target-std"));
+        } else if (a == "--use-gpu") {
+            p.use_gpu = true;
         } else if (a == "--output-mode") {
             p.output_mode = need("--output-mode");
+        } else if (a == "--scene-format") {
+            p.scene_format = need("--scene-format");
+        } else if (a == "--mosaic-cog") {
+            p.mosaic_cog = true;
         } else if (a == "--profile") {
             p.profile_path = need("--profile");
         } else if (a == "--no-profile") {

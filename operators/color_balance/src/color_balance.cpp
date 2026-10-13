@@ -96,6 +96,14 @@ public:
             err = "output_mode 仅支持 tif / vrt";
             return false;
         }
+        if (params_.scene_format != "gtiff" && params_.scene_format != "cog") {
+            err = "scene_format 仅支持 gtiff / cog";
+            return false;
+        }
+        if (params_.method != "block_wallis" &&
+            params_.method != "overlap_adjust+wallis" && params_.mosaic_cog) {
+            ip::logWarn("mosaic_cog 仅在 vrt 输出模式下有效（已忽略）");
+        }
         if (params_.block_size < 64) {
             err = "block_size 最小 64";
             return false;
@@ -144,6 +152,9 @@ private:
             ip::logInfo("==== color_balance 开始 ====，日志: " + logPath);
         }
         ip::MemGuard::checkOrThrow(params_.min_mem_gb, "开始");
+        if (params_.use_gpu) {
+            ip::logWarn("use_gpu=true 但本期为纯 CPU 实现（接口占位），按 CPU 执行");
+        }
 
         // 1. 收集输入
         std::vector<std::string> files;
@@ -278,12 +289,19 @@ private:
             if (useWallis) {
                 report(cb, pct, "应用 Wallis " + S.id);
                 outPath = (fs::path(params_.output_dir) / (stem + ".tif")).string();
+                // 目标 μ=参考景；σ=wallis_target_std（>0 显式值）否则参考景 std
+                double tStd[3];
+                for (int b = 0; b < 3; ++b) {
+                    tStd[b] = params_.wallis_target_std > 0
+                                  ? params_.wallis_target_std
+                                  : scenes_[refIdx].stats.std[b];
+                }
                 const WallisGrid wg = computeWallisGrid(
-                    S.ds.get(), scenes_[refIdx].stats.mean,
-                    scenes_[refIdx].stats.std, params_.block_size, S.gain,
-                    S.offset);
+                    S.ds.get(), scenes_[refIdx].stats.mean, tStd,
+                    params_.block_size, S.gain, S.offset);
                 if (!applyWallisToFile(S.ds.get(), outPath, wg,
-                                       params_.apply_chunk, err)) {
+                                       params_.apply_chunk, err,
+                                       params_.scene_format.c_str())) {
                     return false;
                 }
             } else if (useHist) {
@@ -300,7 +318,8 @@ private:
                     cdfMatchLut(srcHist[b], refHist[b], luts[b]);
                 }
                 if (!applyLutToFile(S.ds.get(), outPath, luts,
-                                    params_.apply_chunk, err)) {
+                                    params_.apply_chunk, err,
+                                    params_.scene_format.c_str())) {
                     return false;
                 }
             } else if (vrtMode) {
@@ -319,7 +338,8 @@ private:
                                     (S.adjusted ? "" : "（无需调节，直拷）"));
                 outPath = (fs::path(params_.output_dir) / (stem + ".tif")).string();
                 if (!applyGainOffsetToFile(S.ds.get(), outPath, S.gain, S.offset,
-                                           params_.apply_chunk, err)) {
+                                           params_.apply_chunk, err,
+                                           params_.scene_format.c_str())) {
                     return false;
                 }
             }
@@ -351,6 +371,31 @@ private:
                 return false;
             }
             ip::logInfo("镶嵌 VRT: " + mosaicPath);
+            // 物理镶嵌 COG（方案 §4.2 balance_and_mosaic；mosaic_cog=true 时）
+            if (params_.mosaic_cog) {
+                report(cb, 96, "输出物理镶嵌 COG");
+                const std::string cogPath =
+                    (fs::path(params_.output_dir) / "mosaic_cog.tif").string();
+                GDALDriver* cog =
+                    GetGDALDriverManager()->GetDriverByName("COG");
+                GDALDataset* m = ip::openReadOnly(mosaicPath).release();
+                if (!cog || !m) {
+                    err = "COG 驱动或镶嵌 VRT 不可用";
+                    return false;
+                }
+                char** copts = CSLSetNameValue(nullptr, "COMPRESS", "DEFLATE");
+                copts = CSLSetNameValue(copts, "BLOCKSIZE", "512");
+                GDALDataset* out = cog->CreateCopy(
+                    cogPath.c_str(), m, FALSE, copts, nullptr, nullptr);
+                CSLDestroy(copts);
+                GDALClose(m);
+                if (!out) {
+                    err = "镶嵌 COG CreateCopy 失败: " + cogPath;
+                    return false;
+                }
+                GDALClose(out);
+                ip::logInfo("物理镶嵌 COG: " + cogPath);
+            }
         }
 
         // 8. 方案 JSON

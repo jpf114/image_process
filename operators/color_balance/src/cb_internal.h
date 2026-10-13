@@ -77,9 +77,11 @@ bool solveLeastSquares(const std::vector<LsEquation>& eqs, int nVars,
                        int refVar, std::vector<double>& out);
 
 // 块式应用 gain/offset 到新 GeoTIFF（保持地理信息/alpha/nodata；无效像素原样）
+// sceneFormat: "gtiff" | "cog"（COG：先写临时 GTiff 再 COG CreateCopy）
 bool applyGainOffsetToFile(GDALDataset* src, const std::string& outPath,
                            const double gain[3], const double offset[3],
-                           int chunkRows, std::string& err);
+                           int chunkRows, std::string& err,
+                           const char* sceneFormat = "gtiff");
 
 // ---- 迭代 2：Wallis / 直方图匹配 ----
 
@@ -101,14 +103,16 @@ WallisGrid computeWallisGrid(GDALDataset* ds, const double targetMean[3],
 
 // 块式应用 Wallis 参数场（双线性采样，参数值位于块中心 (i+0.5)*block）
 bool applyWallisToFile(GDALDataset* src, const std::string& outPath,
-                       const WallisGrid& wg, int chunkRows, std::string& err);
+                       const WallisGrid& wg, int chunkRows, std::string& err,
+                       const char* sceneFormat = "gtiff");
 
 // 直方图匹配：CDF 匹配 LUT（src 分布 → ref 分布）
 void exactHistograms(GDALDataset* ds, uint64_t hist[3][256]);
 void cdfMatchLut(const uint64_t srcHist[256], const uint64_t refHist[256],
                  uint8_t lut[256]);
 bool applyLutToFile(GDALDataset* src, const std::string& outPath,
-                    const uint8_t lut[3][256], int chunkRows, std::string& err);
+                    const uint8_t lut[3][256], int chunkRows, std::string& err,
+                    const char* sceneFormat = "gtiff");
 
 // ---- 迭代 2：VRT 输出（零像素落盘）----
 

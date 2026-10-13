@@ -13,10 +13,64 @@ namespace ipcb {
 
 namespace {
 
+// GTiff 直写实现的前置声明（定义在本文件后部）
+GDALDataset* writeTransformedGtiff(
+    GDALDataset* src, const std::string& outPath, int chunkRows,
+    const std::function<void(uint8_t* buf, size_t n, int y0, int hh,
+                             const std::vector<uint8_t>& valid)>& transform,
+    std::string& err);
+
 // 公共输出骨架：创建 GeoTIFF（DEFLATE+tiled 512）→ 块式读 → 有效像素掩码 →
 // transform(buf, n, y0, hh, valid) 原地修改 RGB → 写出。
 // 无效像素（alpha=0 或 RGB nodata）保持原样。
+// sceneFormat: "gtiff" 直接写；"cog" 先写临时 GTiff 再 COG CreateCopy（目标布局）
 bool writeTransformedTiff(
+    GDALDataset* src, const std::string& outPath, int chunkRows,
+    const std::function<void(uint8_t* buf, size_t n, int y0, int hh,
+                             const std::vector<uint8_t>& valid)>& transform,
+    std::string& err, const char* sceneFormat) {
+    const bool asCog = sceneFormat && std::string(sceneFormat) == "cog";
+    const std::string tmpPath =
+        asCog ? outPath + ".tmp.tif" : outPath;
+    GDALDataset* finalDs =
+        writeTransformedGtiff(src, tmpPath, chunkRows, transform, err);
+    if (!finalDs) return false;
+    GDALClose(finalDs);
+    if (!asCog) return true;
+
+    // COG 布局：CreateCopy（方案 §4.2 per_scene_cog）
+    GDALDriver* cog = GetGDALDriverManager()->GetDriverByName("COG");
+    if (!cog) {
+        err = "COG 驱动不可用";
+        return false;
+    }
+    char** opts = CSLSetNameValue(nullptr, "COMPRESS", "DEFLATE");
+    opts = CSLSetNameValue(opts, "BLOCKSIZE", "512");
+    opts = CSLSetNameValue(opts, "OVERVIEWS", "FORCE_USE_EXISTING");
+    GDALDataset* srcT = static_cast<GDALDataset*>(
+        GDALOpen(tmpPath.c_str(), GA_ReadOnly));
+    if (!srcT) {
+        err = "COG 转换打开临时文件失败: " + tmpPath;
+        CSLDestroy(opts);
+        return false;
+    }
+    GDALDataset* out =
+        cog->CreateCopy(outPath.c_str(), srcT, FALSE, opts, nullptr, nullptr);
+    CSLDestroy(opts);
+    GDALClose(srcT);
+    std::error_code ec;
+    std::filesystem::remove(tmpPath, ec);
+    if (!out) {
+        err = "COG CreateCopy 失败: " + outPath + "（" + CPLGetLastErrorMsg() +
+              "）";
+        return false;
+    }
+    GDALClose(out);
+    return true;
+}
+
+// GTiff 直写实现（writeTransformedTiff 的底层；返回打开的 dataset 供 COG 转换）
+GDALDataset* writeTransformedGtiff(
     GDALDataset* src, const std::string& outPath, int chunkRows,
     const std::function<void(uint8_t* buf, size_t n, int y0, int hh,
                              const std::vector<uint8_t>& valid)>& transform,
@@ -26,13 +80,13 @@ bool writeTransformedTiff(
     const int nb = src->GetRasterCount();
     if (nb < 3) {
         err = "波段数不足 3";
-        return false;
+        return nullptr;
     }
 
     GDALDriver* drv = GetGDALDriverManager()->GetDriverByName("GTiff");
     if (!drv) {
         err = "GTiff 驱动不可用";
-        return false;
+        return nullptr;
     }
     char** opts = CSLSetNameValue(nullptr, "COMPRESS", "DEFLATE");
     opts = CSLSetNameValue(opts, "PREDICTOR", "2");
@@ -43,7 +97,7 @@ bool writeTransformedTiff(
     CSLDestroy(opts);
     if (!out) {
         err = "创建输出失败: " + outPath;
-        return false;
+        return nullptr;
     }
 
     double gt[6];
@@ -82,7 +136,7 @@ bool writeTransformedTiff(
         if (e != CE_None) {
             GDALClose(out);
             err = "读取失败 @y=" + std::to_string(y);
-            return false;
+            return nullptr;
         }
 
         const uint8_t* alpha =
@@ -109,7 +163,7 @@ bool writeTransformedTiff(
         if (e != CE_None) {
             GDALClose(out);
             err = "写入失败 @y=" + std::to_string(y);
-            return false;
+            return nullptr;
         }
     }
 
@@ -118,15 +172,15 @@ bool writeTransformedTiff(
         if (b < 3 && hasNd[b]) ob->SetNoDataValue(nd[b]);
         if (hasAlpha && b == 3) ob->SetColorInterpretation(GCI_AlphaBand);
     }
-    GDALClose(out);
-    return true;
+    return out;
 }
 
 } // namespace
 
 bool applyGainOffsetToFile(GDALDataset* src, const std::string& outPath,
                            const double gain[3], const double offset[3],
-                           int chunkRows, std::string& err) {
+                           int chunkRows, std::string& err,
+                           const char* sceneFormat) {
     return writeTransformedTiff(
         src, outPath, chunkRows,
         [&](uint8_t* buf, size_t n, int, int, const std::vector<uint8_t>& valid) {
@@ -140,7 +194,7 @@ bool applyGainOffsetToFile(GDALDataset* src, const std::string& outPath,
                 }
             }
         },
-        err);
+        err, sceneFormat);
 }
 
 // ============ Wallis ============
@@ -280,7 +334,8 @@ inline float sampleGrid(const std::vector<float>& g, int nbx, int nby, int band,
 } // namespace
 
 bool applyWallisToFile(GDALDataset* src, const std::string& outPath,
-                       const WallisGrid& wg, int chunkRows, std::string& err) {
+                       const WallisGrid& wg, int chunkRows, std::string& err,
+                       const char* sceneFormat) {
     return writeTransformedTiff(
         src, outPath, chunkRows,
         [&](uint8_t* buf, size_t n, int y0, int hh,
@@ -307,7 +362,7 @@ bool applyWallisToFile(GDALDataset* src, const std::string& outPath,
                 }
             }
         },
-        err);
+        err, sceneFormat);
 }
 
 // ============ 直方图匹配 ============
@@ -366,7 +421,8 @@ void cdfMatchLut(const uint64_t srcHist[256], const uint64_t refHist[256],
 }
 
 bool applyLutToFile(GDALDataset* src, const std::string& outPath,
-                    const uint8_t lut[3][256], int chunkRows, std::string& err) {
+                    const uint8_t lut[3][256], int chunkRows, std::string& err,
+                    const char* sceneFormat) {
     return writeTransformedTiff(
         src, outPath, chunkRows,
         [&](uint8_t* buf, size_t n, int, int,
@@ -379,7 +435,7 @@ bool applyLutToFile(GDALDataset* src, const std::string& outPath,
                 }
             }
         },
-        err);
+        err, sceneFormat);
 }
 
 // ============ 方案 JSON ============

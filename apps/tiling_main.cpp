@@ -24,6 +24,10 @@ void usage() {
            "  --nodata-pct-threshold <100>             无效占比阈值（边缘瓦片可 50）\n"
            "  --skip-empty-tiles <true|false>          默认 true\n"
            "  --num-threads <n>                        默认物理核数\n"
+           "  --num-processes <1>                      多景任务级并行（V1=1，多进程随服务化）\n"
+           "  --cache-mb <512>                         GDAL 块缓存（MB）\n"
+           "  --tile-buffer <0>                        增量切片外扩缓冲瓦片数\n"
+           "  --use-gpu                                GPU 占位（本期纯 CPU，仅告警）\n"
            "  --build-overviews <auto|yes|no>          无 ovr 时自动建（低 zoom 提速）\n"
            "  --bbox <minX,minY,maxX,maxY>             增量范围（TMS CRS 坐标，空=全量）\n"
            "  --no-resume                              忽略已存在瓦片（默认续跑跳过）\n"
@@ -82,6 +86,14 @@ int main(int argc, char** argv) {
             p.skip_empty_tiles = parseBool(need("--skip-empty-tiles"));
         } else if (a == "--num-threads") {
             p.num_threads = std::atoi(need("--num-threads"));
+        } else if (a == "--num-processes") {
+            p.num_processes = std::atoi(need("--num-processes"));
+        } else if (a == "--cache-mb") {
+            p.cache_mb = std::atof(need("--cache-mb"));
+        } else if (a == "--tile-buffer") {
+            p.tile_buffer = std::atoi(need("--tile-buffer"));
+        } else if (a == "--use-gpu") {
+            p.use_gpu = true;
         } else if (a == "--build-overviews") {
             p.build_overviews = need("--build-overviews");
         } else if (a == "--bbox") {

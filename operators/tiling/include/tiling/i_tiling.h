@@ -32,13 +32,16 @@ struct TilingParams {
     int nodata_pct_threshold = 100;    // 无效占比 ≥ 阈值 → 整瓦片透明/填充（边缘瓦片可 50）
     bool skip_empty_tiles = true;      // 全无效瓦片不落盘
     int num_threads = 0;               // 0 = 物理核数
-    double cache_mb = 512;             // GDAL 块缓存
+    int num_processes = 1;             // 多景任务级并行（V1=1 串行，多进程随 Phase 4 服务化）
+    double cache_mb = 512;             // GDAL 块缓存（MB，execute 时生效）
+    int tile_buffer = 0;               // 增量切片时范围外扩的缓冲瓦片数（覆盖接边带）
     double min_mem_gb = 1.5;           // 内存护栏
     bool keep_tmp_vrt = false;         // 保留每级 WarpedVRT 临时文件（调试）
     std::string build_overviews = "auto"; // auto（无 ovr 时自动建，AVERAGE 2~64）| yes | no
     std::string bbox;                  // 增量范围 "minX,minY,maxX,maxY"（空=全量，源 SRS 坐标）
     bool resume = true;                // 断点续跑：已存在瓦片跳过
     bool overwrite = false;            // true 时强制重写已存在瓦片
+    bool use_gpu = false;              // GPU 占位（本期纯 CPU，开启仅告警）
 };
 
 using ProgressCallback = std::function<void(int percent, const std::string& msg)>;
